@@ -219,7 +219,7 @@ ask_openclaw_plugin() {
   printf '\n'
   printf '  \033[1mInstall the openclaw-omlx plugin? [Y/n]\033[0m '
   local answer
-  read -r answer
+  read -r answer < /dev/tty
   case "$answer" in
     [nN]|[nN][oO])
       info "Skipping OpenClaw plugin."
@@ -481,15 +481,24 @@ ensure_tailscale_ip() {
   if [ -z "$TAILSCALE_IP" ]; then
     printf '\n'
     info "Tailscale needs to be connected before we can continue."
-    info "A sign-in window may have opened in your browser."
+    info "Tailscale is a free private network that securely connects your Macs."
     printf '\n'
     if [ "$NONINTERACTIVE" = "1" ]; then
       die "Tailscale is not connected and installer is running in non-interactive mode. Connect Tailscale first."
     fi
-    printf '      1. Sign in to Tailscale (or create a free account) in the browser window.\n'
-    printf '      2. Wait until the Tailscale menu bar icon shows "Connected".\n'
-    printf '      3. Come back here and press Enter.\n\n'
-    read -r
+    printf '      \033[1mIf this is your first time using Tailscale:\033[0m\n'
+    printf '      1. macOS may ask you to approve a system extension.\n'
+    printf '         Go to System Settings > Privacy & Security and click Allow.\n'
+    printf '      2. A sign-in window should open in your browser.\n'
+    printf '         Sign in or create a free Tailscale account.\n'
+    printf '      3. Wait until the Tailscale menu bar icon shows "Connected".\n'
+    printf '\n'
+    printf '      \033[1mImportant:\033[0m All the Macs in your PrivateNet cluster must be\n'
+    printf '      on the \033[1msame Tailscale network\033[0m (tailnet). If someone else set this\n'
+    printf '      up, ask them to invite you from the Tailscale admin console.\n'
+    printf '\n'
+    printf '      Press Enter when Tailscale shows "Connected".\n\n'
+    read -r < /dev/tty
     TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
   fi
 
@@ -538,7 +547,7 @@ except Exception:
   else
     printf '  \033[1mAdd the %s tag to this Mac? [Y/n]\033[0m ' "$TAILSCALE_TAG"
     local answer
-    read -r answer
+    read -r answer < /dev/tty
     case "$answer" in
       [nN]|[nN][oO]) do_tag="false" ;;
       *) do_tag="true" ;;
