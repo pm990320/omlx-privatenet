@@ -258,3 +258,31 @@ async def test_health_endpoint_reports_cluster(app_factory, make_node):
     assert payload["status"] == "ok"
     assert payload["router"]["node_id"] == "local-node"
     assert {node["node_id"] for node in payload["cluster"]} == {"local-node", "remote-node"}
+
+
+@pytest.mark.asyncio
+async def test_health_reports_disabled_when_node_disabled(app_factory, make_node, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+    (tmp_path / "disabled").write_text("disabled by test\n")
+
+    nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL])]
+
+    async with app_factory(nodes=nodes) as (_, client):
+        response = await client.get("/health")
+
+    assert response.json()["status"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_node_info_reports_disabled_when_node_disabled(app_factory, make_node, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+    (tmp_path / "disabled").write_text("disabled by test\n")
+
+    nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL])]
+
+    async with app_factory(nodes=nodes) as (_, client):
+        response = await client.get("/v1/node-info")
+
+    payload = response.json()
+    assert payload["healthy"] is False
+    assert payload["disabled"] is True

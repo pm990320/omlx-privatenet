@@ -3,8 +3,10 @@ from __future__ import annotations
 """Cluster discovery and peer health monitoring."""
 
 import asyncio
+import os
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -104,7 +106,7 @@ class NodeHealthMonitor:
             )
 
         self._failures[peer.node_id] = 0
-        return replace(node, consecutive_failures=0, last_error=None, online=peer.online)
+        return replace(node, consecutive_failures=0, last_error=node.last_error, online=peer.online)
 
     async def _probe_local_peer(self, peer: DiscoveredPeer) -> NodeInfo:
         healthy = False
@@ -127,8 +129,18 @@ class NodeHealthMonitor:
         except Exception:  # noqa: BLE001
             healthy = False
 
+        # Administratively disabled — report unhealthy so peers stop routing here
+        disabled = self._is_node_disabled()
+        if disabled:
+            healthy = False
+
         node = self.router.get_node(peer.node_id)
         inflight = node.in_flight if node else 0
+        last_error: str | None = None
+        if disabled:
+            last_error = "node administratively disabled"
+        elif not healthy:
+            last_error = "local oMLX did not respond in time"
         return NodeInfo(
             node_id=peer.node_id,
             tailscale_ip=peer.tailscale_ip,
@@ -140,7 +152,7 @@ class NodeHealthMonitor:
             uptime_seconds=int(time.time() - self.started_at),
             local=True,
             online=True,
-            last_error=(None if healthy else "local oMLX did not respond in time"),
+            last_error=last_error,
         )
 
     async def _probe_remote_peer(self, peer: DiscoveredPeer) -> NodeInfo:
@@ -174,6 +186,12 @@ class NodeHealthMonitor:
         if not self.config.local_omlx_api_key:
             return {}
         return {"Authorization": f"Bearer {self.config.local_omlx_api_key}"}
+
+    @staticmethod
+    def _is_node_disabled() -> bool:
+        """Check whether this node has been administratively disabled."""
+        state_dir = os.environ.get("OMLX_PRIVATENET_STATE_DIR", str(Path.home() / ".omlx-privatenet"))
+        return Path(state_dir, "disabled").exists()
 
     @staticmethod
     def _extract_available_models(models_data: Any) -> list[str]:

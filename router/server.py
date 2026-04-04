@@ -91,8 +91,9 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, Any]:
         """Return local router status plus the currently known cluster view."""
+        disabled = _is_node_disabled()
         return {
-            "status": "ok",
+            "status": "disabled" if disabled else "ok",
             "router": {
                 "host": config.host,
                 "port": config.port,
@@ -106,7 +107,11 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def node_info() -> dict[str, Any]:
         """Return metadata peers use for health and load balancing."""
         node = await monitor.current_local_node_info()
-        return _node_info_payload(node)
+        payload = _node_info_payload(node)
+        if _is_node_disabled():
+            payload["healthy"] = False
+            payload["disabled"] = True
+        return payload
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -401,6 +406,11 @@ def _require_router_api_key(request: Request, config: RouterConfig) -> None:
 
 def _is_local_only(request: Request) -> bool:
     return request.headers.get(LOCAL_ONLY_HEADER, "").strip() == "1"
+
+
+def _is_node_disabled() -> bool:
+    """Check whether this node has been administratively disabled."""
+    return Path(os.environ.get("OMLX_PRIVATENET_STATE_DIR", Path.home() / ".omlx-privatenet"), "disabled").exists()
 
 
 def _node_info_payload(node: NodeInfo) -> dict[str, Any]:

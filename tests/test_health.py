@@ -203,3 +203,70 @@ async def test_remote_node_info_payload_is_parsed(write_config, make_peer):
     assert node.max_concurrent == 9
     assert node.uptime_seconds == 777
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_node_reports_unhealthy(write_config, make_peer, tmp_path, monkeypatch):
+    """When the disabled file exists, local node should report unhealthy."""
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+    (tmp_path / "disabled").write_text("disabled by test\n")
+
+    config = load_config(write_config())
+    router = ConsistentHashRouter(local_node_id=config.local_node_id)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(make_transport_handler(lambda request: httpx.Response(
+        200,
+        json={
+            "node_id": "remote-node",
+            "tailscale_ip": "100.64.0.2",
+            "models": [REMOTE_MODEL],
+            "in_flight": 0,
+            "max_concurrent": 4,
+            "healthy": True,
+            "uptime_seconds": 90,
+        },
+    ))))
+    monitor = NodeHealthMonitor(config, router, client)
+    monitor.discovery.discover = lambda: [
+        make_peer(config.local_node_id, tailscale_ip="100.64.0.1", local=True),
+    ]
+
+    await monitor.run_once()
+
+    local = router.get_node(config.local_node_id)
+    assert local is not None
+    assert local.healthy is False
+    assert local.last_error == "node administratively disabled"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_enabled_node_reports_healthy(write_config, make_peer, tmp_path, monkeypatch):
+    """When the disabled file does not exist, local node should report healthy."""
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+    # No disabled file — node is enabled
+
+    config = load_config(write_config())
+    router = ConsistentHashRouter(local_node_id=config.local_node_id)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(make_transport_handler(lambda request: httpx.Response(
+        200,
+        json={
+            "node_id": "remote-node",
+            "tailscale_ip": "100.64.0.2",
+            "models": [REMOTE_MODEL],
+            "in_flight": 0,
+            "max_concurrent": 4,
+            "healthy": True,
+            "uptime_seconds": 90,
+        },
+    ))))
+    monitor = NodeHealthMonitor(config, router, client)
+    monitor.discovery.discover = lambda: [
+        make_peer(config.local_node_id, tailscale_ip="100.64.0.1", local=True),
+    ]
+
+    await monitor.run_once()
+
+    local = router.get_node(config.local_node_id)
+    assert local is not None
+    assert local.healthy is True
+    await client.aclose()

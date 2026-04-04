@@ -639,6 +639,27 @@ write_start_scripts() {
     "exec python -m router.server --config \"$ROUTER_CONFIG\" --host \"0.0.0.0\" --port \"8741\"" \
   )"
   write_text_file "$ROUTER_START_SCRIPT" 0755 "$router_content"
+
+  # CLI tool for enable/disable/status
+  local cli_content
+  cli_content="$(printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    "export OMLX_PRIVATENET_STATE_DIR=\"$STATE_DIR\"" \
+    "source \"$VENV_DIR/bin/activate\"" \
+    "cd \"$PRIVATENET_SRC\"" \
+    'exec python -m router.cli "$@"' \
+  )"
+  write_text_file "$STATE_DIR/bin/privatenet" 0755 "$cli_content"
+
+  # Symlink into /usr/local/bin if possible, so it's on PATH without venv activation
+  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    ln -sf "$STATE_DIR/bin/privatenet" /usr/local/bin/privatenet
+    success "privatenet command installed to /usr/local/bin/privatenet"
+  else
+    success "privatenet command installed to $STATE_DIR/bin/privatenet"
+    info "Add $STATE_DIR/bin to your PATH, or run it directly:"
+    info "  $STATE_DIR/bin/privatenet status"
+  fi
 }
 
 # ── LaunchAgents ─────────────────────────────────────────────────────────────
@@ -732,6 +753,11 @@ print_summary() {
   printf '\n'
   printf '  \033[1mQuick test:\033[0m\n'
   printf '  \033[2mcurl http://%s:8741/health\033[0m\n' "$TAILSCALE_IP"
+  printf '\n'
+  printf '  \033[1mManage this node:\033[0m\n'
+  printf '  \033[2mprivatenet status\033[0m     Check node status\n'
+  printf '  \033[2mprivatenet disable\033[0m    Take this node out of service\n'
+  printf '  \033[2mprivatenet enable\033[0m     Bring this node back into service\n'
   printf '\n'
 }
 
