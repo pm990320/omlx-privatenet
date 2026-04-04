@@ -472,17 +472,78 @@ ensure_tailscale_ip() {
 }
 
 ensure_tailscale_tag() {
-  info "Trying to advertise the Tailscale tag $TAILSCALE_TAG..."
-  if tailscale up --advertise-tags="$TAILSCALE_TAG" >/dev/null 2>&1; then
+  # Check if we already have the tag
+  local current_tags
+  current_tags="$(tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    tags = d.get("Self", {}).get("Tags", [])
+    print(",".join(tags))
+except Exception:
+    pass
+' 2>/dev/null || true)"
+
+  if echo "$current_tags" | grep -qF "$TAILSCALE_TAG"; then
+    TAILSCALE_TAG_STATUS="ok"
+    success "This Mac is already advertising the tag $TAILSCALE_TAG"
+    return
+  fi
+
+  # Build the new tag list by appending ours to any existing tags
+  local new_tags="$TAILSCALE_TAG"
+  if [ -n "$current_tags" ]; then
+    new_tags="$current_tags,$TAILSCALE_TAG"
+  fi
+
+  # Show the user what we're about to do and ask permission
+  printf '\n'
+  info "PrivateNet peers discover each other using the Tailscale tag $TAILSCALE_TAG."
+  info "To join the network, this Mac needs to advertise that tag."
+  if [ -n "$current_tags" ]; then
+    info "Your current tags: $current_tags"
+    info "New tags will be:  $new_tags"
+  fi
+  printf '\n'
+
+  local do_tag="false"
+  if [ "$NONINTERACTIVE" = "1" ]; then
+    do_tag="true"
+  else
+    printf '  \033[1mAdd the %s tag to this Mac? [Y/n]\033[0m ' "$TAILSCALE_TAG"
+    local answer
+    read -r answer
+    case "$answer" in
+      [nN]|[nN][oO]) do_tag="false" ;;
+      *) do_tag="true" ;;
+    esac
+  fi
+
+  if [ "$do_tag" = "false" ]; then
+    TAILSCALE_TAG_STATUS="skipped"
+    warn "Skipped. Other PrivateNet nodes won't discover this Mac automatically."
+    warn "You can add the tag later with: tailscale set --advertise-tags=$new_tags"
+    return
+  fi
+
+  # Use 'tailscale set' (modifies only the specified field, unlike 'tailscale up')
+  if tailscale set --advertise-tags="$new_tags" >/dev/null 2>&1; then
+    TAILSCALE_TAG_STATUS="ok"
+    success "This Mac is now advertising the tag $TAILSCALE_TAG"
+    return
+  fi
+
+  # Fallback: try 'tailscale up' with --reset for older Tailscale versions
+  if tailscale up --advertise-tags="$new_tags" --reset >/dev/null 2>&1; then
     TAILSCALE_TAG_STATUS="ok"
     success "This Mac is now advertising the tag $TAILSCALE_TAG"
     return
   fi
 
   TAILSCALE_TAG_STATUS="needs-admin"
-  warn "Couldn't enable $TAILSCALE_TAG automatically. That's usually an ACL policy issue, not a problem with your Mac."
-  warn "Your Tailscale admin needs to add this tag to the tailnet policy: $TAILSCALE_TAG"
-  warn "After the policy is updated, run this on the Mac: tailscale up --advertise-tags=$TAILSCALE_TAG"
+  warn "Couldn't set the tag automatically. This usually means your Tailscale admin"
+  warn "needs to allow the tag $TAILSCALE_TAG in the tailnet ACL policy."
+  warn "After the policy is updated, run: tailscale set --advertise-tags=$new_tags"
 }
 
 # ── Source code ──────────────────────────────────────────────────────────────
@@ -887,10 +948,14 @@ print_summary() {
   if [ "$TAILSCALE_TAG_STATUS" = "needs-admin" ]; then
     printf '  \033[1m\033[0;33mAction still needed:\033[0m Ask your Tailscale admin to allow the tag\n'
     printf '  \033[0;33m  %s\033[0m in the tailnet ACL policy, then run:\n' "$TAILSCALE_TAG"
-    printf '  \033[2m  tailscale up --advertise-tags=%s\033[0m\n' "$TAILSCALE_TAG"
+    printf '  \033[2m  tailscale set --advertise-tags=%s\033[0m\n' "$TAILSCALE_TAG"
+    printf '\n'
+  elif [ "$TAILSCALE_TAG_STATUS" = "skipped" ]; then
+    printf '  \033[0;33mTailscale tag was skipped.\033[0m Add it later with:\n'
+    printf '  \033[2m  tailscale set --advertise-tags=%s\033[0m\n' "$TAILSCALE_TAG"
     printf '\n'
   else
-    printf '  \033[0;32mThis Mac is already advertising the Tailscale tag %s.\033[0m\n' "$TAILSCALE_TAG"
+    printf '  \033[0;32mThis Mac is advertising the Tailscale tag %s.\033[0m\n' "$TAILSCALE_TAG"
     printf '\n'
   fi
   if [ "$INSTALL_OPENCLAW" = "true" ]; then
