@@ -1,8 +1,8 @@
 PYTHON ?= python3
 VENV := $(CURDIR)/.venv
 REPO_ROOT := $(abspath ..)
-CONFIG ?= $(CURDIR)/config.json
-RUN := cd "$(REPO_ROOT)" && "$(VENV)/bin/python" -m balancer.server --config "$(CONFIG)"
+CONFIG ?= $(HOME)/.omlx-privatenet/router.json
+RUN := cd "$(REPO_ROOT)" && "$(VENV)/bin/python" -m router.server --config "$(CONFIG)"
 
 .PHONY: install run install-launchagent print-config
 

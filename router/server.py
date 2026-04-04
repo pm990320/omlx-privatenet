@@ -15,9 +15,9 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .config import BalancerConfig, NodeConfig, load_config, resolve_config_path
+from .config import RouterConfig, load_config, resolve_config_path
 from .health import NodeHealthMonitor
-from .router import CacheAwareRouter, RouteDecision
+from .router import ConsistentHashRouter, NodeInfo, RouteDecision
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -30,7 +30,9 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-LAUNCH_AGENT_LABEL = "com.omlx-privatenet.balancer"
+LOCAL_ONLY_HEADER = "x-omlx-router-local-only"
+ROUTED_BY_HEADER = "x-omlx-routed-by"
+LAUNCH_AGENT_LABEL = "com.omlx-privatenet.router"
 
 
 def create_app(config_path: str | Path | None = None) -> FastAPI:
@@ -41,12 +43,12 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         write=config.request_timeout_seconds,
         pool=config.request_timeout_seconds,
     )
-    client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
-    router = CacheAwareRouter(
-        config.nodes,
+    client = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
+    router = ConsistentHashRouter(
+        local_node_id=config.local_node_id,
         prefix_message_count=config.prefix_message_count,
-        sticky_ttl_seconds=config.sticky_ttl_seconds,
-        default_max_inflight=config.default_max_inflight,
+        overload_threshold=config.overload_threshold,
+        consistent_hash_replicas=config.consistent_hash_replicas,
     )
     monitor = NodeHealthMonitor(config, router, client)
 
@@ -57,7 +59,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         app.state.router = router
         app.state.monitor = monitor
         await monitor.run_once()
-        task = asyncio.create_task(monitor.run_forever(), name="omlx-privatenet-health")
+        task = asyncio.create_task(monitor.run_forever(), name="omlx-privatenet-discovery")
         app.state.health_task = task
         try:
             yield
@@ -70,24 +72,32 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                 pass
             await client.aclose()
 
-    app = FastAPI(title="oMLX PrivateNet Balancer", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="oMLX PrivateNet Router", version="0.2.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def enforce_auth(request: Request, call_next):  # type: ignore[override]
-        if request.url.path == "/health":
+        if request.url.path in {"/health", "/v1/node-info"}:
             return await call_next(request)
-        _require_balancer_api_key(request, config)
+        _require_router_api_key(request, config)
         return await call_next(request)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
-            "host": config.host,
-            "port": config.port,
-            "nodes": router.snapshot()["nodes"],
+            "router": {
+                "host": config.host,
+                "port": config.port,
+                "node_id": config.local_node_id,
+            },
+            "cluster": router.snapshot()["nodes"],
             "models": router.aggregate_models(),
         }
+
+    @app.get("/v1/node-info")
+    async def node_info() -> dict[str, Any]:
+        node = await monitor.current_local_node_info()
+        return _node_info_payload(node)
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -104,11 +114,14 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
         payload = await _read_json_body(request)
+        if _is_local_only(request):
+            return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/chat/completions", stream=bool(payload.get("stream")))
+
         try:
             decision = router.route_chat(payload)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return await _proxy_request(
+        return await _proxy_via_selected_node(
             request=request,
             payload=payload,
             endpoint="/v1/chat/completions",
@@ -119,11 +132,14 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Response:
         payload = await _read_json_body(request)
+        if _is_local_only(request):
+            return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/embeddings", stream=False)
+
         try:
             decision = router.route_embeddings(payload)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return await _proxy_request(
+        return await _proxy_via_selected_node(
             request=request,
             payload=payload,
             endpoint="/v1/embeddings",
@@ -134,7 +150,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     return app
 
 
-async def _proxy_request(
+async def _proxy_via_selected_node(
     *,
     request: Request,
     payload: dict[str, Any],
@@ -144,73 +160,144 @@ async def _proxy_request(
 ) -> Response:
     app = request.app
     client: httpx.AsyncClient = app.state.client
-    router: CacheAwareRouter = app.state.router
+    router: ConsistentHashRouter = app.state.router
+    config: RouterConfig = app.state.config
 
     last_error: str | None = None
     for node in decision.ordered_candidates:
-        acquired = False
-        streaming_response: httpx.Response | None = None
-        router.mark_inflight(node.node_id, 1)
-        acquired = True
+        router.bump_inflight(node.node_id, 1)
+        release_on_exit = True
         try:
+            if node.local or node.node_id == config.local_node_id:
+                response = await _proxy_to_local_omlx(
+                    request=request,
+                    payload=payload,
+                    endpoint=endpoint,
+                    stream=stream,
+                    selected=node,
+                    decision=decision,
+                    manage_inflight=False,
+                )
+                if stream:
+                    release_on_exit = False
+                return response
+
             if stream:
-                streaming_response = await _send_streaming(client=client, node=node, endpoint=endpoint, payload=payload)
-                if streaming_response.status_code >= 500 and node is not decision.ordered_candidates[-1]:
-                    status_code = streaming_response.status_code
-                    await streaming_response.aclose()
-                    streaming_response = None
+                upstream = await _send_streaming(
+                    client=client,
+                    node=node,
+                    endpoint=endpoint,
+                    payload=payload,
+                    headers=_peer_headers(request, config),
+                )
+                if upstream.status_code >= 500 and node.node_id != decision.ordered_candidates[-1].node_id:
+                    status_code = upstream.status_code
+                    await upstream.aclose()
+                    router.mark_node_unhealthy(node.node_id, f"{node.node_id} returned {status_code}")
                     last_error = f"{node.node_id} returned {status_code}"
-                    router.update_node_health(node.node_id, healthy=False, error=last_error)
-                    router.release(node.node_id)
-                    acquired = False
                     continue
-                return _streaming_response(router=router, node=node, upstream=streaming_response, decision=decision)
+                release_on_exit = False
+                return _streaming_response(router=router, node=node, upstream=upstream, decision=decision)
 
             upstream = await client.post(
-                f"{node.base_url}{endpoint}",
+                f"{node.router_url}{endpoint}",
                 json=payload,
-                headers=_upstream_headers(node),
+                headers=_peer_headers(request, config),
             )
-            if upstream.status_code >= 500 and node is not decision.ordered_candidates[-1]:
+            if upstream.status_code >= 500 and node.node_id != decision.ordered_candidates[-1].node_id:
                 last_error = f"{node.node_id} returned {upstream.status_code}"
-                router.update_node_health(node.node_id, healthy=False, error=last_error)
+                router.mark_node_unhealthy(node.node_id, last_error)
                 continue
             return _buffered_response(node=node, upstream=upstream, decision=decision)
         except httpx.HTTPError as exc:
             last_error = f"{node.node_id}: {exc}"
-            router.update_node_health(node.node_id, healthy=False, error=last_error)
+            router.mark_node_unhealthy(node.node_id, last_error)
         finally:
-            if acquired and (not stream or streaming_response is None):
+            if release_on_exit:
                 router.release(node.node_id)
 
     raise HTTPException(status_code=503, detail=last_error or "No healthy upstream node accepted the request.")
 
 
+async def _proxy_to_local_omlx(
+    *,
+    request: Request,
+    payload: dict[str, Any],
+    endpoint: str,
+    stream: bool,
+    selected: NodeInfo | None = None,
+    decision: RouteDecision | None = None,
+    manage_inflight: bool = True,
+) -> Response:
+    app = request.app
+    client: httpx.AsyncClient = app.state.client
+    router: ConsistentHashRouter = app.state.router
+    config: RouterConfig = app.state.config
+    node = selected or router.get_node(config.local_node_id) or NodeInfo(
+        node_id=config.local_node_id,
+        tailscale_ip=config.local_tailscale_ip or "127.0.0.1",
+        router_url=f"http://{config.local_tailscale_ip or '127.0.0.1'}:{config.port}",
+        models=list(config.local_models),
+        in_flight=0,
+        max_concurrent=config.local_max_concurrent,
+        healthy=False,
+        uptime_seconds=0,
+        local=True,
+    )
+
+    if manage_inflight:
+        router.bump_inflight(node.node_id, 1)
+
+    release_on_exit = manage_inflight
+    try:
+        if stream:
+            upstream = await _send_streaming(
+                client=client,
+                node=node,
+                endpoint=endpoint,
+                payload=payload,
+                headers=_local_omlx_headers(config),
+                base_url=config.local_omlx_url,
+            )
+            release_on_exit = False
+            return _streaming_response(router=router, node=node, upstream=upstream, decision=decision)
+
+        upstream = await client.post(
+            f"{config.local_omlx_url}{endpoint}",
+            json=payload,
+            headers=_local_omlx_headers(config),
+        )
+        return _buffered_response(node=node, upstream=upstream, decision=decision)
+    finally:
+        if release_on_exit:
+            router.release(node.node_id)
+
+
 async def _send_streaming(
     *,
     client: httpx.AsyncClient,
-    node: NodeConfig,
+    node: NodeInfo,
     endpoint: str,
     payload: dict[str, Any],
+    headers: dict[str, str],
+    base_url: str | None = None,
 ) -> httpx.Response:
+    target_base = base_url or node.router_url
     request = client.build_request(
         "POST",
-        f"{node.base_url}{endpoint}",
+        f"{target_base}{endpoint}",
         json=payload,
-        headers=_upstream_headers(node),
+        headers=headers,
     )
     return await client.send(request, stream=True)
 
 
-def _buffered_response(
-    *,
-    node: NodeConfig,
-    upstream: httpx.Response,
-    decision: RouteDecision,
-) -> Response:
+def _buffered_response(*, node: NodeInfo, upstream: httpx.Response, decision: RouteDecision | None) -> Response:
     headers = _filtered_headers(upstream.headers)
     headers["x-omlx-privatenet-node"] = node.node_id
-    headers["x-omlx-routing-key"] = decision.routing_key
+    if decision is not None:
+        headers["x-omlx-routing-key"] = decision.routing_key
+        headers["x-omlx-routing-reason"] = decision.reason
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -221,14 +308,16 @@ def _buffered_response(
 
 def _streaming_response(
     *,
-    router: CacheAwareRouter,
-    node: NodeConfig,
+    router: ConsistentHashRouter,
+    node: NodeInfo,
     upstream: httpx.Response,
-    decision: RouteDecision,
+    decision: RouteDecision | None,
 ) -> StreamingResponse:
     headers = _filtered_headers(upstream.headers)
     headers["x-omlx-privatenet-node"] = node.node_id
-    headers["x-omlx-routing-key"] = decision.routing_key
+    if decision is not None:
+        headers["x-omlx-routing-key"] = decision.routing_key
+        headers["x-omlx-routing-reason"] = decision.reason
 
     async def iterator() -> AsyncIterator[bytes]:
         try:
@@ -265,11 +354,24 @@ def _filtered_headers(headers: httpx.Headers | dict[str, str]) -> dict[str, str]
     return result
 
 
-def _upstream_headers(node: NodeConfig) -> dict[str, str]:
-    return {"Authorization": f"Bearer {node.api_key}"}
+def _local_omlx_headers(config: RouterConfig) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if config.local_omlx_api_key:
+        headers["Authorization"] = f"Bearer {config.local_omlx_api_key}"
+    return headers
 
 
-def _require_balancer_api_key(request: Request, config: BalancerConfig) -> None:
+def _peer_headers(request: Request, config: RouterConfig) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    auth = request.headers.get("authorization")
+    if auth:
+        headers["Authorization"] = auth
+    headers[LOCAL_ONLY_HEADER] = "1"
+    headers[ROUTED_BY_HEADER] = config.local_node_id
+    return headers
+
+
+def _require_router_api_key(request: Request, config: RouterConfig) -> None:
     if not config.api_key:
         return
     auth = request.headers.get("authorization", "")
@@ -277,12 +379,28 @@ def _require_balancer_api_key(request: Request, config: BalancerConfig) -> None:
     if auth != expected:
         raise HTTPException(
             status_code=401,
-            detail="Invalid or missing balancer API key.",
+            detail="Invalid or missing router API key.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
 
-def install_launchagent(config_path: str | Path, *, load: bool = True) -> Path:
+def _is_local_only(request: Request) -> bool:
+    return request.headers.get(LOCAL_ONLY_HEADER, "").strip() == "1"
+
+
+def _node_info_payload(node: NodeInfo) -> dict[str, Any]:
+    return {
+        "node_id": node.node_id,
+        "tailscale_ip": node.tailscale_ip,
+        "models": list(node.models),
+        "in_flight": node.in_flight,
+        "max_concurrent": node.max_concurrent,
+        "healthy": node.healthy,
+        "uptime_seconds": node.uptime_seconds,
+    }
+
+
+def install_launchagent(config_path: str | Path | None = None, *, load: bool = True) -> Path:
     config = load_config(config_path)
     resolved_config = resolve_config_path(config_path)
     repo_root = Path(__file__).resolve().parent.parent
@@ -294,7 +412,7 @@ def install_launchagent(config_path: str | Path, *, load: bool = True) -> Path:
     program = [
         sys.executable,
         "-m",
-        "balancer.server",
+        "router.server",
         "--config",
         str(resolved_config),
         "--host",
@@ -308,8 +426,8 @@ def install_launchagent(config_path: str | Path, *, load: bool = True) -> Path:
         "WorkingDirectory": str(repo_root),
         "RunAtLoad": True,
         "KeepAlive": True,
-        "StandardOutPath": str(logs_dir / "balancer.stdout.log"),
-        "StandardErrorPath": str(logs_dir / "balancer.stderr.log"),
+        "StandardOutPath": str(logs_dir / "router.stdout.log"),
+        "StandardErrorPath": str(logs_dir / "router.stderr.log"),
     }
     with plist_path.open("wb") as handle:
         plistlib.dump(payload, handle)
@@ -325,11 +443,15 @@ def install_launchagent(config_path: str | Path, *, load: bool = True) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the oMLX PrivateNet load balancer.")
-    parser.add_argument("--config", default=str(resolve_config_path()), help="Path to balancer config JSON.")
+    parser = argparse.ArgumentParser(description="Run the oMLX PrivateNet router.")
+    parser.add_argument("--config", default=str(resolve_config_path()), help="Path to router config JSON.")
     parser.add_argument("--host", default=None, help="Override bind host.")
     parser.add_argument("--port", default=None, type=int, help="Override bind port.")
-    parser.add_argument("--install-launchagent", action="store_true", help="Write ~/Library/LaunchAgents/com.omlx-privatenet.balancer.plist and optionally load it.")
+    parser.add_argument(
+        "--install-launchagent",
+        action="store_true",
+        help="Write ~/Library/LaunchAgents/com.omlx-privatenet.router.plist and optionally load it.",
+    )
     parser.add_argument("--no-load", action="store_true", help="When used with --install-launchagent, only write the plist.")
     return parser
 

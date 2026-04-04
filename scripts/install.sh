@@ -3,31 +3,36 @@ set -euo pipefail
 
 OMLX_REPO="https://github.com/pm990320/omlx.git"
 OMLX_REF="v0.3.2"
+PRIVATENET_REPO="https://github.com/pm990320/omlx-privatenet.git"
+PRIVATENET_REF="main"
 MLX_LM_FORK="git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
 MODEL_1="gemma-4-26b-a4b-it-4bit"
 MODEL_2="gemma-4-31b-it-4bit"
+TAILSCALE_TAG="tag:omlx-node"
 STATE_DIR="$HOME/.omlx-privatenet"
 OMLX_BASE="$HOME/.omlx"
 INSTALL_ROOT="$HOME/omlx-privatenet"
 OMLX_SRC="$INSTALL_ROOT/omlx"
+PRIVATENET_SRC="$INSTALL_ROOT/omlx-privatenet"
 VENV_DIR="$STATE_DIR/venv"
 NODE_ENV="$STATE_DIR/node.env"
-NODE_JSON="$STATE_DIR/node.json"
-START_SCRIPT="$STATE_DIR/start-edge.sh"
+ROUTER_CONFIG="$STATE_DIR/router.json"
+OMLX_START_SCRIPT="$STATE_DIR/start-omlx.sh"
+ROUTER_START_SCRIPT="$STATE_DIR/start-router.sh"
 MODEL_DIR="$OMLX_BASE/models"
-LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.omlx-privatenet.edge.plist"
-LAUNCH_LABEL="com.omlx-privatenet.edge"
+OMLX_AGENT="$HOME/Library/LaunchAgents/com.omlx-privatenet.omlx.plist"
+ROUTER_AGENT="$HOME/Library/LaunchAgents/com.omlx-privatenet.router.plist"
+OMLX_LABEL="com.omlx-privatenet.omlx"
+ROUTER_LABEL="com.omlx-privatenet.router"
 TAILSCALE_IP=""
+TAILSCALE_TAG_STATUS=""
 BREW_BIN=""
 PYTHON_BIN=""
 PIP_BIN=""
 HF_BIN=""
+NODE_ID=""
 STEP=0
-TOTAL_STEPS=9
-
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
+TOTAL_STEPS=10
 
 BOLD='\033[1m'
 DIM='\033[2m'
@@ -126,12 +131,15 @@ ensure_dependencies() {
   [ -x "$PYTHON_BIN" ] || die "Python 3.13 didn't install correctly. Try running the installer again."
 }
 
-ensure_tailscale_ip() {
+ensure_tailscale_cli() {
   if ! command -v tailscale >/dev/null 2>&1 && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
     export PATH="/Applications/Tailscale.app/Contents/MacOS:$PATH"
   fi
-
   command -v tailscale >/dev/null 2>&1 || die "Tailscale CLI not found. Try re-running this installer."
+}
+
+ensure_tailscale_ip() {
+  ensure_tailscale_cli
   open -ga Tailscale >/dev/null 2>&1 || true
 
   TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
@@ -141,7 +149,7 @@ ensure_tailscale_ip() {
     info "A sign-in window may have opened in your browser."
     printf '\n'
     printf '      1. Sign in to Tailscale (or create a free account) in the browser window.\n'
-    printf '      2. Wait until the Tailscale menu bar icon shows \"Connected\".\n'
+    printf '      2. Wait until the Tailscale menu bar icon shows "Connected".\n'
     printf '      3. Come back here and press Enter.\n\n'
     read -r
     TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
@@ -151,8 +159,23 @@ ensure_tailscale_ip() {
   success "Tailscale connected — your private network address is $TAILSCALE_IP"
 }
 
-ensure_omlx_source() {
+ensure_tailscale_tag() {
+  info "Trying to advertise the Tailscale tag $TAILSCALE_TAG..."
+  if tailscale up --advertise-tags="$TAILSCALE_TAG" >/dev/null 2>&1; then
+    TAILSCALE_TAG_STATUS="ok"
+    success "This Mac is now advertising the tag $TAILSCALE_TAG"
+    return
+  fi
+
+  TAILSCALE_TAG_STATUS="needs-admin"
+  warn "Couldn't enable $TAILSCALE_TAG automatically. That's usually an ACL policy issue, not a problem with your Mac."
+  warn "Your Tailscale admin needs to add this tag to the tailnet policy: $TAILSCALE_TAG"
+  warn "After the policy is updated, run this on the Mac: tailscale up --advertise-tags=$TAILSCALE_TAG"
+}
+
+ensure_repos() {
   mkdir -p "$INSTALL_ROOT"
+
   if [ -d "$OMLX_SRC/.git" ]; then
     info "oMLX source already exists — updating to $OMLX_REF..."
     git -C "$OMLX_SRC" remote set-url origin "$OMLX_REPO"
@@ -163,9 +186,23 @@ ensure_omlx_source() {
     die "$OMLX_SRC already exists but isn't a proper install. Please delete or move that folder, then re-run."
   else
     info "Downloading oMLX $OMLX_REF (the AI inference server)..."
-    info "This is a small download — should only take a few seconds."
     git clone --branch "$OMLX_REF" --depth 1 "$OMLX_REPO" "$OMLX_SRC"
     success "oMLX downloaded."
+  fi
+
+  if [ -d "$PRIVATENET_SRC/.git" ]; then
+    info "PrivateNet router source already exists — updating to $PRIVATENET_REF..."
+    git -C "$PRIVATENET_SRC" remote set-url origin "$PRIVATENET_REPO"
+    git -C "$PRIVATENET_SRC" fetch origin
+    git -C "$PRIVATENET_SRC" checkout "$PRIVATENET_REF"
+    git -C "$PRIVATENET_SRC" pull --ff-only origin "$PRIVATENET_REF"
+    success "PrivateNet router updated."
+  elif [ -e "$PRIVATENET_SRC" ]; then
+    die "$PRIVATENET_SRC already exists but isn't a proper git checkout. Please delete or move that folder, then re-run."
+  else
+    info "Downloading the PrivateNet router code..."
+    git clone --branch "$PRIVATENET_REF" --depth 1 "$PRIVATENET_REPO" "$PRIVATENET_SRC"
+    success "PrivateNet router downloaded."
   fi
 }
 
@@ -182,8 +219,7 @@ ensure_venv() {
   PIP_BIN="$VENV_DIR/bin/pip"
   HF_BIN="$VENV_DIR/bin/huggingface-cli"
 
-  info "Now installing the AI software. This involves several packages and may"
-  info "take 2-5 minutes depending on your internet speed. You'll see progress below."
+  info "Now installing the AI software. This may take a few minutes depending on your internet speed."
   printf '\n'
 
   info "Upgrading core Python tools..."
@@ -194,7 +230,7 @@ ensure_venv() {
   "$PIP_BIN" install --upgrade huggingface-hub
   success "Hugging Face tools installed."
 
-  info "Installing oMLX (the AI inference server that runs on your Mac)..."
+  info "Installing oMLX (the local inference server)..."
   "$PIP_BIN" install -e "$OMLX_SRC"
   success "oMLX installed."
 
@@ -205,6 +241,10 @@ ensure_venv() {
   info "Installing our custom AI language model library (adds Gemma 4 support)..."
   "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_FORK"
   success "Custom mlx-lm installed."
+
+  info "Installing the PrivateNet router dependencies..."
+  "$PIP_BIN" install -r "$PRIVATENET_SRC/router/requirements.txt"
+  success "Router dependencies installed."
 }
 
 ensure_models() {
@@ -250,19 +290,23 @@ ensure_api_key() {
   fi
 
   if [ -z "${OMLX_API_KEY:-}" ]; then
-    info "Generating a unique secret key for this node (like a password for the AI server)..."
+    info "Generating a unique secret key for the local oMLX server..."
     OMLX_API_KEY="$(python3 -c 'import secrets, string; alphabet = string.ascii_letters + string.digits; print("pn-" + "".join(secrets.choice(alphabet) for _ in range(40)))')"
     success "API key generated."
   else
-    success "Using existing API key."
+    success "Using existing oMLX API key."
   fi
+
+  NODE_ID="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  NODE_ID="$(printf '%s' "$NODE_ID" | tr '[:space:]/' '--' | tr -cd '[:alnum:]._-')"
+  [ -n "$NODE_ID" ] || NODE_ID="$(hostname)"
 }
 
 write_node_env() {
   local content
   content="$(printf '%s\n' \
     "export OMLX_API_KEY=$OMLX_API_KEY" \
-    "export OMLX_HOST=0.0.0.0" \
+    "export OMLX_HOST=127.0.0.1" \
     "export OMLX_PORT=5741" \
     "export OMLX_MODEL_DIR=$MODEL_DIR" \
     "export OMLX_LOG_LEVEL=info")"
@@ -270,140 +314,164 @@ write_node_env() {
 }
 
 write_settings_json() {
-  python3 -c 'from pathlib import Path; import json, sys; path = Path(sys.argv[1]).expanduser(); path.parent.mkdir(parents=True, exist_ok=True); payload = {"version": "1.0", "server": {"host": "0.0.0.0", "port": 5741, "log_level": "info", "cors_origins": ["*"]}, "model": {"model_dirs": [sys.argv[2]], "model_dir": sys.argv[2], "max_model_memory": "auto", "model_fallback": False}, "memory": {"max_process_memory": "auto", "prefill_memory_guard": True}, "scheduler": {"max_num_seqs": 8, "completion_batch_size": 8}, "cache": {"enabled": True, "ssd_cache_dir": None, "ssd_cache_max_size": "auto", "hot_cache_max_size": "0", "initial_cache_blocks": 256}, "auth": {"api_key": sys.argv[3], "secret_key": None, "skip_api_key_verification": False, "sub_keys": []}, "mcp": {"config_path": None}, "huggingface": {"endpoint": ""}, "modelscope": {"endpoint": ""}, "sampling": {"max_context_window": 128000, "max_tokens": 32768, "temperature": 1.0, "top_p": 0.95, "top_k": 0, "repetition_penalty": 1.0}, "logging": {"log_dir": None, "retention_days": 7}, "claude_code": {"context_scaling_enabled": False, "target_context_size": 200000, "mode": "cloud", "opus_model": None, "sonnet_model": None, "haiku_model": None}, "integrations": {"codex_model": None, "opencode_model": None, "openclaw_model": None, "openclaw_tools_profile": "coding"}, "ui": {"language": "en"}}; path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")' "$OMLX_BASE/settings.json" "$MODEL_DIR" "$OMLX_API_KEY"
+  python3 -c 'from pathlib import Path; import json, sys; path = Path(sys.argv[1]).expanduser(); path.parent.mkdir(parents=True, exist_ok=True); payload = {"version": "1.0", "server": {"host": "127.0.0.1", "port": 5741, "log_level": "info", "cors_origins": ["*"]}, "model": {"model_dirs": [sys.argv[2]], "model_dir": sys.argv[2], "max_model_memory": "auto", "model_fallback": False}, "memory": {"max_process_memory": "auto", "prefill_memory_guard": True}, "scheduler": {"max_num_seqs": 8, "completion_batch_size": 8}, "cache": {"enabled": True, "ssd_cache_dir": None, "ssd_cache_max_size": "auto", "hot_cache_max_size": "0", "initial_cache_blocks": 256}, "auth": {"api_key": sys.argv[3], "secret_key": None, "skip_api_key_verification": False, "sub_keys": []}, "mcp": {"config_path": None}, "huggingface": {"endpoint": ""}, "modelscope": {"endpoint": ""}, "sampling": {"max_context_window": 128000, "max_tokens": 32768, "temperature": 1.0, "top_p": 0.95, "top_k": 0, "repetition_penalty": 1.0}, "logging": {"log_dir": None, "retention_days": 7}, "claude_code": {"context_scaling_enabled": False, "target_context_size": 200000, "mode": "cloud", "opus_model": None, "sonnet_model": None, "haiku_model": None}, "integrations": {"codex_model": None, "opencode_model": None, "openclaw_model": None, "openclaw_tools_profile": "coding"}, "ui": {"language": "en"}}; path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")' "$OMLX_BASE/settings.json" "$MODEL_DIR" "$OMLX_API_KEY"
 }
 
-write_start_script() {
-  local content
-  content="$(printf '%s\n' \
+write_router_config() {
+  python3 -c 'from pathlib import Path; import json, sys; path = Path(sys.argv[1]).expanduser(); path.parent.mkdir(parents=True, exist_ok=True); payload = {"host": "0.0.0.0", "port": 8741, "api_key": None, "connect_timeout_seconds": 10, "request_timeout_seconds": 600, "discovery_interval_seconds": 30, "health_check_timeout_seconds": 5, "failure_threshold": 3, "prefix_message_count": 3, "overload_threshold": None, "consistent_hash_replicas": 128, "tailscale_tag": sys.argv[2], "local_node_id": sys.argv[3], "local_tailscale_ip": sys.argv[4], "local_omlx_url": "http://127.0.0.1:5741", "local_omlx_api_key": sys.argv[5], "local_models": [sys.argv[6], sys.argv[7]], "local_max_concurrent": 8}; path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")' "$ROUTER_CONFIG" "$TAILSCALE_TAG" "$NODE_ID" "$TAILSCALE_IP" "$OMLX_API_KEY" "$MODEL_1" "$MODEL_2"
+}
+
+write_start_scripts() {
+  local omlx_content router_content
+  omlx_content="$(printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     "source \"$NODE_ENV\"" \
     "source \"$VENV_DIR/bin/activate\"" \
-    "exec omlx serve --base-path \"$OMLX_BASE\" --host \"0.0.0.0\" --port \"5741\" --model-dir \"$MODEL_DIR\" --api-key \"$OMLX_API_KEY\""
+    "exec omlx serve --base-path \"$OMLX_BASE\" --host \"127.0.0.1\" --port \"5741\" --model-dir \"$MODEL_DIR\" --api-key \"$OMLX_API_KEY\"" \
   )"
-  write_text_file "$START_SCRIPT" 0755 "$content"
+  write_text_file "$OMLX_START_SCRIPT" 0755 "$omlx_content"
+
+  router_content="$(printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "source \"$NODE_ENV\"" \
+    "source \"$VENV_DIR/bin/activate\"" \
+    "cd \"$PRIVATENET_SRC\"" \
+    "exec python -m router.server --config \"$ROUTER_CONFIG\" --host \"0.0.0.0\" --port \"8741\"" \
+  )"
+  write_text_file "$ROUTER_START_SCRIPT" 0755 "$router_content"
 }
 
 write_launchagent() {
-  python3 -c 'from pathlib import Path; import plistlib, sys; plist = Path(sys.argv[1]).expanduser(); script = Path(sys.argv[2]).expanduser(); logs = Path(sys.argv[3]).expanduser(); label = sys.argv[4]; plist.parent.mkdir(parents=True, exist_ok=True); logs.mkdir(parents=True, exist_ok=True); payload = {"Label": label, "ProgramArguments": [str(script)], "RunAtLoad": True, "KeepAlive": True, "WorkingDirectory": str(script.parent), "StandardOutPath": str(logs / "edge.stdout.log"), "StandardErrorPath": str(logs / "edge.stderr.log")}; plist.write_bytes(plistlib.dumps(payload))' "$LAUNCH_AGENT" "$START_SCRIPT" "$STATE_DIR/logs" "$LAUNCH_LABEL"
+  local plist_path="$1"
+  local script_path="$2"
+  local label="$3"
+  local stdout_name="$4"
+  local stderr_name="$5"
+  python3 -c 'from pathlib import Path; import plistlib, sys; plist = Path(sys.argv[1]).expanduser(); script = Path(sys.argv[2]).expanduser(); logs = Path(sys.argv[3]).expanduser(); label = sys.argv[4]; stdout_name = sys.argv[5]; stderr_name = sys.argv[6]; plist.parent.mkdir(parents=True, exist_ok=True); logs.mkdir(parents=True, exist_ok=True); payload = {"Label": label, "ProgramArguments": [str(script)], "RunAtLoad": True, "KeepAlive": True, "WorkingDirectory": str(script.parent), "StandardOutPath": str(logs / stdout_name), "StandardErrorPath": str(logs / stderr_name)}; plist.write_bytes(plistlib.dumps(payload))' "$plist_path" "$script_path" "$STATE_DIR/logs" "$label" "$stdout_name" "$stderr_name"
 }
 
 load_launchagent() {
+  local plist_path="$1"
+  local label="$2"
   local uid
   uid="$(id -u)"
-  launchctl bootout "gui/$uid" "$LAUNCH_AGENT" >/dev/null 2>&1 || true
-  if ! launchctl bootstrap "gui/$uid" "$LAUNCH_AGENT" >/dev/null 2>&1; then
-    launchctl unload "$LAUNCH_AGENT" >/dev/null 2>&1 || true
-    launchctl load -w "$LAUNCH_AGENT"
+  launchctl bootout "gui/$uid" "$plist_path" >/dev/null 2>&1 || true
+  if ! launchctl bootstrap "gui/$uid" "$plist_path" >/dev/null 2>&1; then
+    launchctl unload "$plist_path" >/dev/null 2>&1 || true
+    launchctl load -w "$plist_path"
   fi
-  launchctl kickstart -k "gui/$uid/$LAUNCH_LABEL" >/dev/null 2>&1 || true
-}
-
-write_node_json() {
-  python3 -c 'from pathlib import Path; import json, sys; path = Path(sys.argv[1]).expanduser(); path.parent.mkdir(parents=True, exist_ok=True); payload = {"tailscale_ip": sys.argv[2], "port": 5741, "api_key": sys.argv[3], "models": [sys.argv[4], sys.argv[5]], "endpoint": f"http://{sys.argv[2]}:5741/v1"}; path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")' "$NODE_JSON" "$TAILSCALE_IP" "$OMLX_API_KEY" "$MODEL_1" "$MODEL_2"
+  launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
 }
 
 print_summary() {
   printf '\n'
   printf '\033[1m\033[0;32m════════════════════════════════════════════════════════════\033[0m\n'
-  printf '\033[1m\033[0;32m  🎉  All done! Your Mac is now an AI edge node.\033[0m\n'
+  printf '\033[1m\033[0;32m  🎉  All done! This Mac now runs both oMLX and the router.\033[0m\n'
   printf '\033[1m\033[0;32m════════════════════════════════════════════════════════════\033[0m\n'
   printf '\n'
   printf '  \033[1mWhat just happened:\033[0m\n'
-  printf '  • The AI server (oMLX) is running in the background\n'
-  printf '  • It will start automatically when you reboot your Mac\n'
-  printf '  • Two AI models are loaded and ready to go\n'
+  printf '  • oMLX is running locally on 127.0.0.1:5741\n'
+  printf '  • The router is running on 0.0.0.0:8741\n'
+  printf '  • Both services will start automatically after reboots\n'
+  printf '  • This Mac will discover peer nodes automatically through Tailscale\n'
   printf '\n'
-  printf '  \033[1mYour node details:\033[0m\n'
+  printf '  \033[1mThis node:\033[0m\n'
+  printf '  • Node ID:       %s\n' "$NODE_ID"
   printf '  • Tailscale IP:  %s\n' "$TAILSCALE_IP"
+  printf '  • Router URL:    http://%s:8741/v1\n' "$TAILSCALE_IP"
   printf '  • Models:        %s\n' "$MODEL_1"
   printf '                   %s\n' "$MODEL_2"
-  printf '  • Config file:   %s\n' "$NODE_JSON"
+  printf '  • Router config: %s\n' "$ROUTER_CONFIG"
   printf '\n'
-  printf '  \033[1m\033[0;36mNext step:\033[0m Send your node.json file to the network admin.\n'
-  printf '  They will add your Mac to the cluster so it can start\n'
-  printf '  processing AI requests from the network.\n'
-  printf '\n'
-  printf '  \033[2mTo send it: open Finder, press Cmd+Shift+G, paste this path:\033[0m\n'
-  printf '  \033[2m%s\033[0m\n' "$STATE_DIR"
+  if [ "$TAILSCALE_TAG_STATUS" = "needs-admin" ]; then
+    printf '  \033[1m\033[0;33mAction still needed:\033[0m Ask your Tailscale admin to allow the tag\n'
+    printf '  \033[0;33m  %s\033[0m in the tailnet ACL policy, then run:\n' "$TAILSCALE_TAG"
+    printf '  \033[2m  tailscale up --advertise-tags=%s\033[0m\n' "$TAILSCALE_TAG"
+    printf '\n'
+  else
+    printf '  \033[0;32mThis Mac is already advertising the Tailscale tag %s.\033[0m\n' "$TAILSCALE_TAG"
+    printf '\n'
+  fi
+  printf '  \033[1mNext step:\033[0m Point OpenClaw (or any OpenAI-compatible client) at:\n'
+  printf '  \033[2mhttp://%s:8741/v1\033[0m\n' "$TAILSCALE_IP"
   printf '\n'
 }
 
 main() {
   printf '\n'
   printf '\033[1m\033[0;36m╔════════════════════════════════════════════════════════════\033[0m\n'
-  printf '\033[1m\033[0;36m║           oMLX PrivateNet — Edge Node Installer            ║\033[0m\n'
+  printf '\033[1m\033[0;36m║         oMLX PrivateNet — Peer Node Installer              ║\033[0m\n'
   printf '\033[1m\033[0;36m╚════════════════════════════════════════════════════════════\033[0m\n'
   printf '\n'
-  printf '  This script will turn your Mac into an AI processing node\n'
-  printf '  on a private network. Here is what it will do:\n'
+  printf '  This script will turn your Mac into a full PrivateNet peer.\n'
+  printf '  Every peer runs two things:\n'
   printf '\n'
+  printf '  • oMLX on 127.0.0.1:5741  (local inference server)\n'
+  printf '  • Router on 0.0.0.0:8741 (OpenAI-compatible API + peer discovery)\n'
+  printf '\n'
+  printf '  The installer will:\n'
   printf '  1. Check that your Mac is compatible (Apple Silicon required)\n'
   printf '  2. Install developer tools (Homebrew, Python, Git)\n'
-  printf '  3. Set up Tailscale (the private network)\n'
-  printf '  4. Download the AI server software (oMLX)\n'
-  printf '  5. Install Python libraries for AI inference\n'
+  printf '  3. Set up Tailscale and try to advertise %s\n' "$TAILSCALE_TAG"
+  printf '  4. Download oMLX and the PrivateNet router code\n'
+  printf '  5. Install Python libraries for both services\n'
   printf '  6. Download two AI models (~33 GB total — this takes a while!)\n'
-  printf '  7. Configure everything and start the server\n'
-  printf '\n'
-  printf '  \033[2mThe whole process takes about 30-60 minutes, mostly waiting\n'
-  printf '  for the AI models to download. You can use your Mac normally\n'
-  printf '  while it runs.\033[0m\n'
+  printf '  7. Configure everything and start both background services\n'
   printf '\n'
   printf '  \033[2mSafe to re-run — it will skip anything already installed.\033[0m\n'
   printf '\n'
 
-  # ── Step 1: Compatibility check ──
   step "Checking your Mac" "Making sure this is an Apple Silicon Mac (M1/M2/M3/M4)..."
   require_supported_host
   success "Apple Silicon Mac confirmed — you're good to go!"
 
-  # ── Step 2: Homebrew + dev tools ──
   step "Installing developer tools" "These are standard Mac tools used by millions of developers."
   ensure_homebrew
 
-  # ── Step 3: Dependencies ──
   step "Installing required software" "Python (runs the AI), Git (downloads code), Tailscale (private network)."
   ensure_dependencies
 
-  # ── Step 4: Tailscale ──
   step "Connecting to Tailscale" "Tailscale creates a secure private network between all the Macs."
   ensure_tailscale_ip
 
-  # ── Step 5: oMLX source ──
-  step "Downloading the AI server" "oMLX is the server that runs AI models on Apple Silicon."
-  ensure_omlx_source
+  step "Advertising the PrivateNet tag" "Peers find each other automatically by the Tailscale tag $TAILSCALE_TAG."
+  ensure_tailscale_tag
 
-  # ── Step 6: Python environment + packages ──
-  step "Setting up the AI software" "Installing all the Python libraries needed to run AI models."
+  step "Downloading the software" "Fetching both oMLX and the PrivateNet router code."
+  ensure_repos
+
+  step "Setting up the Python environment" "Installing the libraries needed for both oMLX and the router."
   ensure_venv
 
-  # ── Step 7: AI models ──
   step "Downloading AI models" "These are the actual AI brains — two versions of Google's Gemma 4."
   info "⏱  This is the longest step. Total download: ~33 GB."
-  info "   On a 100 Mbps connection: ~45 minutes. On gigabit: ~5 minutes."
   printf '\n'
   ensure_models
 
-  # ── Step 8: Configuration ──
-  step "Configuring your node" "Setting up security keys and server settings."
+  step "Writing configuration" "Creating the local config files for oMLX and the router."
   ensure_api_key
   write_node_env
   success "Environment config written."
   write_settings_json
-  success "Server settings written."
+  success "oMLX settings written."
+  write_router_config
+  success "Router settings written."
+  write_start_scripts
+  success "Startup scripts created."
 
-  # ── Step 9: Launch ──
-  step "Starting the AI server" "Setting it up to run automatically, even after reboots."
-  write_start_script
-  success "Startup script created."
-  write_launchagent
-  success "Automatic startup configured (LaunchAgent)."
-  load_launchagent
-  success "AI server is now running!"
-  write_node_json
-  success "Node registration file created."
+  step "Installing automatic startup" "Creating one LaunchAgent for oMLX and a second one for the router."
+  write_launchagent "$OMLX_AGENT" "$OMLX_START_SCRIPT" "$OMLX_LABEL" "omlx.stdout.log" "omlx.stderr.log"
+  success "oMLX LaunchAgent written."
+  write_launchagent "$ROUTER_AGENT" "$ROUTER_START_SCRIPT" "$ROUTER_LABEL" "router.stdout.log" "router.stderr.log"
+  success "Router LaunchAgent written."
+
+  step "Starting both services" "Bringing up oMLX first, then the router."
+  load_launchagent "$OMLX_AGENT" "$OMLX_LABEL"
+  success "oMLX is running."
+  load_launchagent "$ROUTER_AGENT" "$ROUTER_LABEL"
+  success "Router is running."
 
   print_summary
 }

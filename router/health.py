@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import replace
+from typing import Any
+
+import httpx
+
+from .config import RouterConfig
+from .discovery import DiscoveredPeer, TailscaleDiscovery
+from .router import ConsistentHashRouter, NodeInfo
+
+
+class NodeHealthMonitor:
+    def __init__(self, config: RouterConfig, router: ConsistentHashRouter, client: httpx.AsyncClient) -> None:
+        self.config = config
+        self.router = router
+        self.client = client
+        self.discovery = TailscaleDiscovery(config)
+        self.started_at = time.time()
+        self._stop = asyncio.Event()
+        self._known_peers: dict[str, DiscoveredPeer] = {}
+        self._last_nodes: dict[str, NodeInfo] = {}
+        self._failures: dict[str, int] = {}
+
+    async def run_forever(self) -> None:
+        while not self._stop.is_set():
+            await self.run_once()
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.config.discovery_interval_seconds)
+            except asyncio.TimeoutError:
+                continue
+
+    async def stop(self) -> None:
+        self._stop.set()
+
+    async def run_once(self) -> None:
+        discovered = await asyncio.to_thread(self.discovery.discover)
+        self._known_peers = {peer.node_id: peer for peer in discovered}
+        self._failures = {node_id: count for node_id, count in self._failures.items() if node_id in self._known_peers}
+        self._last_nodes = {node_id: node for node_id, node in self._last_nodes.items() if node_id in self._known_peers}
+
+        tasks = [self._probe_peer(peer) for peer in discovered]
+        nodes = [node for node in await asyncio.gather(*tasks) if node is not None]
+        self._last_nodes = {node.node_id: node for node in nodes}
+        self.router.update_nodes(nodes)
+
+    async def current_local_node_info(self) -> NodeInfo:
+        peer = self._known_peers.get(self.config.local_node_id)
+        if peer is None:
+            discovered = await asyncio.to_thread(self.discovery.discover)
+            for item in discovered:
+                if item.local:
+                    peer = item
+                    self._known_peers[item.node_id] = item
+                    break
+        if peer is None:
+            raise RuntimeError("Could not determine local Tailscale identity.")
+        node = await self._probe_local_peer(peer)
+        self._last_nodes[node.node_id] = node
+        return node
+
+    async def _probe_peer(self, peer: DiscoveredPeer) -> NodeInfo | None:
+        try:
+            node = await (self._probe_local_peer(peer) if peer.local else self._probe_remote_peer(peer))
+        except Exception as exc:  # noqa: BLE001
+            failures = self._failures.get(peer.node_id, 0) + 1
+            self._failures[peer.node_id] = failures
+            last = self._last_nodes.get(peer.node_id)
+            if last is None:
+                models = list(self.config.local_models) if peer.local else []
+                max_concurrent = self.config.local_max_concurrent if peer.local else (self.config.overload_threshold or 1)
+                return NodeInfo(
+                    node_id=peer.node_id,
+                    tailscale_ip=peer.tailscale_ip,
+                    router_url=peer.router_url,
+                    models=models,
+                    in_flight=0,
+                    max_concurrent=max_concurrent,
+                    healthy=False,
+                    uptime_seconds=int(time.time() - self.started_at),
+                    local=peer.local,
+                    consecutive_failures=failures,
+                    last_error=str(exc),
+                    online=peer.online,
+                )
+            return replace(
+                last,
+                healthy=False,
+                consecutive_failures=failures,
+                last_error=str(exc),
+                online=peer.online,
+            )
+
+        self._failures[peer.node_id] = 0
+        return replace(node, consecutive_failures=0, last_error=None, online=peer.online)
+
+    async def _probe_local_peer(self, peer: DiscoveredPeer) -> NodeInfo:
+        started = time.perf_counter()
+        healthy = False
+        loaded_models: list[str] = []
+        try:
+            health_task = self.client.get(
+                f"{self.config.local_omlx_url}/health",
+                timeout=self.config.health_check_timeout_seconds,
+            )
+            status_task = self.client.get(
+                f"{self.config.local_omlx_url}/v1/models/status",
+                headers=self._local_omlx_headers(),
+                timeout=self.config.health_check_timeout_seconds,
+            )
+            health_response, status_response = await asyncio.gather(health_task, status_task)
+            health_response.raise_for_status()
+            status_response.raise_for_status()
+            health_data = health_response.json()
+            loaded_models = self._extract_loaded_models(health_data, status_response.json())
+            healthy = True
+        except Exception:  # noqa: BLE001
+            healthy = False
+
+        node = self.router.get_node(peer.node_id)
+        inflight = node.in_flight if node else 0
+        _ = started  # reserved for future latency reporting
+        return NodeInfo(
+            node_id=peer.node_id,
+            tailscale_ip=peer.tailscale_ip,
+            router_url=peer.router_url,
+            models=list(self.config.local_models),
+            in_flight=inflight,
+            max_concurrent=self.config.local_max_concurrent,
+            healthy=healthy,
+            uptime_seconds=int(time.time() - self.started_at),
+            local=True,
+            online=True,
+            last_error=(None if healthy else "local oMLX did not respond in time"),
+        ) if not loaded_models else NodeInfo(
+            node_id=peer.node_id,
+            tailscale_ip=peer.tailscale_ip,
+            router_url=peer.router_url,
+            models=loaded_models,
+            in_flight=inflight,
+            max_concurrent=self.config.local_max_concurrent,
+            healthy=healthy,
+            uptime_seconds=int(time.time() - self.started_at),
+            local=True,
+            online=True,
+            last_error=(None if healthy else "local oMLX did not respond in time"),
+        )
+
+    async def _probe_remote_peer(self, peer: DiscoveredPeer) -> NodeInfo:
+        response = await self.client.get(
+            f"{peer.router_url}/v1/node-info",
+            timeout=self.config.health_check_timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Unexpected node-info payload from {peer.node_id}")
+
+        models = payload.get("models") or []
+        if not isinstance(models, list):
+            raise RuntimeError(f"Invalid models list from {peer.node_id}")
+
+        return NodeInfo(
+            node_id=str(payload.get("node_id") or peer.node_id),
+            tailscale_ip=str(payload.get("tailscale_ip") or peer.tailscale_ip),
+            router_url=peer.router_url,
+            models=[str(model) for model in models],
+            in_flight=max(0, int(payload.get("in_flight", 0))),
+            max_concurrent=max(1, int(payload.get("max_concurrent", self.config.local_max_concurrent))),
+            healthy=bool(payload.get("healthy", False)),
+            uptime_seconds=max(0, int(payload.get("uptime_seconds", 0))),
+            local=False,
+            online=peer.online,
+        )
+
+    def _local_omlx_headers(self) -> dict[str, str]:
+        if not self.config.local_omlx_api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.config.local_omlx_api_key}"}
+
+    @staticmethod
+    def _extract_loaded_models(health_data: dict[str, Any], status_data: Any) -> list[str]:
+        loaded = health_data.get("loaded_models")
+        if isinstance(loaded, list) and loaded:
+            return [str(model) for model in loaded]
+
+        if isinstance(status_data, dict):
+            items = status_data.get("data") or status_data.get("models") or []
+        elif isinstance(status_data, list):
+            items = status_data
+        else:
+            items = []
+
+        results: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("loaded"):
+                model_id = item.get("id")
+                if model_id:
+                    results.append(str(model_id))
+        return results

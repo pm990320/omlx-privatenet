@@ -1,38 +1,46 @@
 # omlx-privatenet
 
-Distributed oMLX inference for trusted Macs on the same Tailscale tailnet.
+Peer-to-peer oMLX inference for trusted Macs on the same Tailscale tailnet.
 
 ```text
-[OpenClaw / any client]
-        |
-        v
-  [Load Balancer :8741]
-   /      |       \
-  v       v        v
-[Mac1]  [Mac2]   [Mac3]
-  :5741   :5741    :5741
+Every Mac runs:
+
+┌──────────────────────────────────────────────┐
+│ Mac A / Mac B / Mac C / ...                  │
+│                                              │
+│  oMLX                 127.0.0.1:5741         │
+│  Router               0.0.0.0:8741           │
+│  Tailscale discovery  tag:omlx-node          │
+└──────────────────────────────────────────────┘
+
+Any client can connect to ANY router on :8741.
+That router discovers peers over Tailscale and forwards the request
+to the best node's local oMLX server.
 ```
 
-`omlx-privatenet` gives you two pieces:
+`omlx-privatenet` now gives you a single edge install that turns every Mac into a full peer:
 
-1. **An edge-node installer** for Apple Silicon Macs running oMLX behind Tailscale.
-2. **A FastAPI load balancer** that exposes an OpenAI-compatible API and routes requests to the best node while preserving KV-cache locality as much as possible.
+1. **oMLX** bound locally on `127.0.0.1:5741`
+2. **Router** bound on `0.0.0.0:8741` with an OpenAI-compatible API
+
+There is no central load balancer, no `cluster.json`, and no admin collecting node manifests.
 
 ## Why this exists
 
 oMLX already does a great job with prefix cache reuse on one machine. This repo extends that idea across many Macs on one private network:
 
 - keep traffic on **Tailscale only**
-- use **oMLX's built-in API key auth**
-- route repeat conversations back to the **same node**
-- use **prefix-based affinity** for new sessions with the same system prompt or opening turns
-- fall back safely when a preferred node is down or overloaded
+- discover peers automatically with **`tailscale status --json`**
+- route repeat conversations back to the **same node** with consistent hashing
+- use **prefix-based hashing** for requests that do not include a session ID
+- fail over immediately when a node is down or overloaded
+- keep the system simple: no external coordinator, no gossip, no API keys for discovery
 
 ## Quickstart
 
-### 1) Install an edge node on a Mac
+### 1) Install a peer node on each Mac
 
-Run this on an Apple Silicon Mac that should join the cluster:
+Run this on every Apple Silicon Mac that should join the cluster:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pm990320/omlx-privatenet/main/scripts/install.sh | bash
@@ -42,80 +50,99 @@ The installer will:
 
 - verify macOS + Apple Silicon
 - install Homebrew, Python 3.13, git, and Tailscale if missing
-- clone **`pm990320/omlx`** at **`v0.3.2`** into `~/omlx-privatenet/omlx`
+- connect Tailscale and try to advertise `tag:omlx-node`
+- clone **`pm990320/omlx`** at **`v0.3.2`**
+- clone this repo so the router code is installed locally too
 - create `~/.omlx-privatenet/venv`
-- install oMLX, `huggingface-hub`, `xgrammar`, and the **Gemma 4 tool-calling mlx-lm fork**
+- install oMLX, router requirements, `huggingface-hub`, `xgrammar`, and the **Gemma 4 tool-calling mlx-lm fork**
 - download both default models:
   - `gemma-4-26b-a4b-it-4bit`
   - `gemma-4-31b-it-4bit`
-- configure oMLX to bind to `0.0.0.0:5741`
-- generate and persist a node API key in `~/.omlx-privatenet/node.env`
-- create `~/Library/LaunchAgents/com.omlx-privatenet.edge.plist`
-- write `~/.omlx-privatenet/node.json`
+- configure oMLX to bind to `127.0.0.1:5741`
+- write `~/.omlx-privatenet/router.json`
+- create two LaunchAgents:
+  - `~/Library/LaunchAgents/com.omlx-privatenet.omlx.plist`
+  - `~/Library/LaunchAgents/com.omlx-privatenet.router.plist`
+- start both services automatically
 
-When it finishes, send `~/.omlx-privatenet/node.json` to the cluster admin.
+If tag advertisement fails, the installer prints the exact follow-up for the Tailscale admin:
 
-### 2) Build the cluster file on the balancer host
+> Your Tailscale admin needs to add this to the ACL policy: `tag:omlx-node`
 
-Copy `cluster.example.json` to `cluster.json` and add the node JSON payload from each Mac.
+### 2) Point clients at any node's router
 
-```json
-[
-  {
-    "name": "mac-mini-m4",
-    "tailscale_ip": "100.64.0.11",
-    "port": 5741,
-    "api_key": "pn-node-key-1",
-    "models": [
-      "gemma-4-26b-a4b-it-4bit",
-      "gemma-4-31b-it-4bit"
-    ],
-    "max_inflight": 2
-  }
-]
+Use any peer's Tailscale IP or MagicDNS name:
+
+```text
+http://100.x.y.z:8741/v1
 ```
 
-### 3) Start the balancer
+See [docs/openclaw-config.md](docs/openclaw-config.md) for an OpenClaw example.
+
+## Discovery model
+
+Every router periodically runs:
 
 ```bash
-cd balancer
-cp config.example.json config.json
-make run
+tailscale status --json
 ```
 
-Default balancer listen address: `0.0.0.0:8741`
+It then:
 
-### 4) Point OpenClaw at the balancer
+1. finds peers tagged `tag:omlx-node`
+2. gets their Tailscale IPs
+3. probes `http://<peer_ip>:8741/v1/node-info`
+4. builds a live routing table from those responses
 
-See [docs/openclaw-config.md](docs/openclaw-config.md).
+There is no manual node registry.
 
-## Request routing strategy
+## Routing strategy
 
-This is the v1 router design:
+### 1) Session affinity via consistent hashing
 
-1. **Session affinity first**
-   - if a request includes `session_id`, `conversation_id`, `thread_id`, `chat_id`, `metadata.session_id`, or `user`, the balancer hashes that value and keeps the session on one node whenever possible.
-2. **Prefix affinity second**
-   - for new sessions, the balancer chunk-hashes the first few messages and records which node likely has that prefix cached.
-3. **Bounded-load fallback**
-   - if the preferred node is unhealthy or over the node's `max_inflight` threshold, the balancer walks the rendezvous-hash ordering and picks the first node under the load cap.
-4. **Least-loaded safety net**
-   - if every candidate is overloaded, the balancer still serves the request on the least-loaded healthy node.
+If a request includes `session_id`, `conversation_id`, `thread_id`, `chat_id`, `metadata.session_id`, or `user`, the router hashes that value onto a shared consistent-hash ring.
 
-This is intentionally simple: no oMLX changes, no central registry, and no deep cache introspection.
+Because every router sees the same peer list and uses the same hash function, they all pick the same primary node.
+
+### 2) Prefix hashing for requests without session IDs
+
+If there is no session identifier, the router hashes the first few messages (default: 3) and uses that prefix hash as the ring key.
+
+That preserves the original cache-locality idea without requiring a central coordinator.
+
+### 3) Deterministic failover
+
+If the primary node is:
+
+- unhealthy, or
+- overloaded (`in_flight >= overload_threshold`, or `max_concurrent` when no override is set)
+
+then the router walks clockwise around the same consistent-hash ring until it finds the next healthy node.
+
+**Availability wins over cache locality.** A cache miss is acceptable. A dead primary is not.
+
+### 4) Health checks
+
+Each router probes peers through `/v1/node-info`.
+
+- timeout: `5s` by default
+- interval: `30s` by default
+- after **1 failure** the node is treated as unhealthy for routing
+- after **3 consecutive failures** it stays out of the routing path until it recovers
+- recovery is automatic as soon as `/v1/node-info` responds again
 
 ## Repo layout
 
 ```text
 omlx-privatenet/
 ├── README.md
-├── cluster.example.json
 ├── scripts/
 │   └── install.sh
-├── balancer/
+├── router/
 │   ├── __init__.py
 │   ├── config.py
 │   ├── config.example.json
+│   ├── discovery.py
 │   ├── health.py
 │   ├── Makefile
 │   ├── requirements.txt
@@ -127,66 +154,77 @@ omlx-privatenet/
 └── LICENSE
 ```
 
-## Balancer config
+## Router config
 
-`balancer/config.example.json` controls the balancer process itself:
+The router reads optional local settings from:
+
+```text
+~/.omlx-privatenet/router.json
+```
+
+Example:
 
 ```json
 {
   "host": "0.0.0.0",
   "port": 8741,
-  "api_key": "change-me-balancer-api-key",
-  "health_interval_seconds": 30,
-  "connect_timeout_seconds": 10,
-  "request_timeout_seconds": 600,
-  "prefix_message_count": 3,
-  "sticky_ttl_seconds": 43200,
-  "default_max_inflight": 2,
-  "cluster_file": "../cluster.json"
+  "api_key": null,
+  "discovery_interval_seconds": 30,
+  "health_check_timeout_seconds": 5,
+  "failure_threshold": 3,
+  "overload_threshold": null,
+  "local_node_id": "macbook-patrick",
+  "local_tailscale_ip": "100.64.0.10",
+  "local_omlx_url": "http://127.0.0.1:5741",
+  "local_omlx_api_key": "pn-local-omlx-key",
+  "local_models": [
+    "gemma-4-26b-a4b-it-4bit",
+    "gemma-4-31b-it-4bit"
+  ],
+  "local_max_concurrent": 8
 }
 ```
 
-`cluster.json` is the node registry. It is manually maintained by the admin and intentionally not committed.
+Notes:
+
+- `api_key` is optional. If you enable it, use the **same shared router API key on every node** so peer-to-peer forwarding keeps working cleanly.
+- `overload_threshold: null` means: use each node's advertised `max_concurrent` value.
+- discovery uses only Tailscale; no external service or registry is required.
 
 ## LaunchAgent support
 
-### Edge nodes
+Each node installs two separate LaunchAgents:
 
-The installer writes:
+- `com.omlx-privatenet.omlx`
+- `com.omlx-privatenet.router`
 
-- `~/Library/LaunchAgents/com.omlx-privatenet.edge.plist`
-- `~/.omlx-privatenet/start-edge.sh`
-
-### Balancer
-
-Install the balancer as a LaunchAgent from the repo root:
+Manual install from the repo is still available:
 
 ```bash
-cd balancer
-cp config.example.json config.json
+cd router
+cp config.example.json ~/.omlx-privatenet/router.json
 make install-launchagent
 ```
 
-That writes `~/Library/LaunchAgents/com.omlx-privatenet.balancer.plist` and loads it for the current macOS user.
-
 ## API surface
 
-The balancer exposes:
+The router exposes:
 
 - `GET /health`
+- `GET /v1/node-info`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/embeddings`
 
-All `/v1/*` endpoints use the balancer API key from `balancer/config.json` when set.
+The `/v1/node-info` endpoint describes the local node's oMLX state and is what peers use for health + load information.
 
 ## Notes
 
 - Traffic stays inside **Tailscale**.
-- No TLS is required on top because Tailscale already encrypts the transport.
-- Each edge node keeps its **own oMLX API key**.
-- The balancer stores those node keys in `cluster.json`.
-- The balancer does not require any changes to oMLX internals.
+- oMLX stays local-only on `127.0.0.1:5741`.
+- The router is the only network-facing process.
+- No `cluster.json` is used anywhere.
+- No admin role is required for normal day-to-day operation.
 
 ## License
 

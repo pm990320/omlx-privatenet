@@ -1,0 +1,23 @@
+{
+  "host": "0.0.0.0",
+  "port": 8741,
+  "api_key": null,
+  "connect_timeout_seconds": 10,
+  "request_timeout_seconds": 600,
+  "discovery_interval_seconds": 30,
+  "health_check_timeout_seconds": 5,
+  "failure_threshold": 3,
+  "prefix_message_count": 3,
+  "overload_threshold": null,
+  "consistent_hash_replicas": 128,
+  "tailscale_tag": "tag:omlx-node",
+  "local_node_id": "macbook-patrick",
+  "local_tailscale_ip": "100.64.0.10",
+  "local_omlx_url": "http://127.0.0.1:5741",
+  "local_omlx_api_key": "pn-local-omlx-key",
+  "local_models": [
+    "gemma-4-26b-a4b-it-4bit",
+    "gemma-4-31b-it-4bit"
+  ],
+  "local_max_concurrent": 8
+}

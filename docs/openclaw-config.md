@@ -1,6 +1,6 @@
 # OpenClaw configuration
 
-Point OpenClaw at the PrivateNet balancer as if it were a normal OpenAI-compatible provider.
+Point OpenClaw at any PrivateNet router as if it were a normal OpenAI-compatible provider.
 
 ## Example provider block
 
@@ -10,7 +10,7 @@ Point OpenClaw at the PrivateNet balancer as if it were a normal OpenAI-compatib
     "providers": {
       "privatenet": {
         "baseUrl": "http://100.x.y.z:8741/v1",
-        "apiKey": "balancer-api-key",
+        "apiKey": "optional-shared-router-api-key",
         "api": "openai-completions",
         "models": [
           {
@@ -36,17 +36,30 @@ Point OpenClaw at the PrivateNet balancer as if it were a normal OpenAI-compatib
 
 Replace:
 
-- `100.x.y.z` with the **Tailscale IP of the balancer host**
-- `balancer-api-key` with the `api_key` from `balancer/config.json`
+- `100.x.y.z` with the **Tailscale IP or MagicDNS name of any peer node**
+- `optional-shared-router-api-key` with your shared router API key if you enabled one
 
 ## Recommended setup
 
-1. Put the balancer on a stable machine in the same tailnet.
-2. Keep `cluster.json` updated when nodes join or leave.
-3. Reuse a stable OpenClaw session/conversation ID when possible so the balancer can preserve node affinity and improve cache reuse.
+1. Pick any stable peer as the default entry point.
+2. Better yet, use **Tailscale MagicDNS** so the URL stays readable.
+3. Reuse a stable OpenClaw session/conversation ID when possible so the router can preserve deterministic session affinity.
+4. If you enable router auth, use the **same shared router API key on every node**.
+
+## Example with MagicDNS
+
+```json
+{
+  "baseUrl": "http://macbook-patrick.tailnet-name.ts.net:8741/v1",
+  "apiKey": "optional-shared-router-api-key",
+  "api": "openai-completions"
+}
+```
 
 ## Operational notes
 
-- `/v1/models` is aggregated across every configured node.
-- `/v1/chat/completions` uses session affinity first, then prefix affinity, then bounded-load fallback.
-- `/v1/embeddings` uses healthy least-load routing for the requested model.
+- `/v1/models` is aggregated from the discovered peers.
+- `/v1/chat/completions` uses session-hash routing first, then prefix-hash routing, then deterministic failover.
+- `/v1/embeddings` uses healthy least-load routing.
+- You do **not** need to maintain `cluster.json` anywhere.
+- You can fail over manually by switching OpenClaw to another node's router URL; the routing logic stays the same.
