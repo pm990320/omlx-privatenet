@@ -256,11 +256,16 @@ install_openclaw_plugin() {
   if [ -f "$openclaw_config" ]; then
     info "Configuring plugin to use router at $router_url..."
     python3 -c '
-import json, sys
+import json, shutil, sys
+from pathlib import Path
 
-config_path = sys.argv[1]
+config_path = Path(sys.argv[1])
 router_url = sys.argv[2]
 api_key = sys.argv[3]
+
+# Back up before modifying
+backup_path = config_path.with_suffix(".json.pre-privatenet-bak")
+shutil.copy2(config_path, backup_path)
 
 with open(config_path, "r") as f:
     config = json.load(f)
@@ -270,15 +275,36 @@ entries = plugins.setdefault("entries", {})
 omlx = entries.setdefault("omlx", {})
 omlx["enabled"] = True
 omlx_config = omlx.setdefault("config", {})
-omlx_config["baseUrl"] = router_url
-if api_key:
+
+# Only set baseUrl if missing or still pointing at a local oMLX default
+# (do not overwrite intentional user customizations)
+DEFAULT_OMLX_URLS = {
+    "http://127.0.0.1:5741/v1",
+    "http://127.0.0.1:8000/v1",
+    "http://localhost:5741/v1",
+    "http://localhost:8000/v1",
+}
+current_url = omlx_config.get("baseUrl", "")
+if not current_url or current_url in DEFAULT_OMLX_URLS:
+    omlx_config["baseUrl"] = router_url
+    print(f"UPDATED baseUrl -> {router_url}")
+else:
+    print(f"KEPT existing baseUrl: {current_url}")
+
+# Only set apiKey if not already configured
+if not omlx_config.get("apiKey") and api_key:
     omlx_config["apiKey"] = api_key
+    print("UPDATED apiKey")
+else:
+    print("KEPT existing apiKey")
 
 with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
     f.write("\n")
-' "$openclaw_config" "$router_url" "$OMLX_API_KEY"
-    success "OpenClaw configured to use PrivateNet router at $router_url"
+' "$openclaw_config" "$router_url" "$OMLX_API_KEY" 2>&1 | while IFS= read -r line; do
+      info "$line"
+    done
+    success "OpenClaw plugin configured (backup at openclaw.json.pre-privatenet-bak)"
   else
     warn "Could not find openclaw.json at $openclaw_config"
     warn "After installing OpenClaw, configure the plugin manually:"
