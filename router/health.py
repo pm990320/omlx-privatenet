@@ -108,22 +108,21 @@ class NodeHealthMonitor:
 
     async def _probe_local_peer(self, peer: DiscoveredPeer) -> NodeInfo:
         healthy = False
-        loaded_models: list[str] = []
+        available_models: list[str] = []
         try:
             health_task = self.client.get(
                 f"{self.config.local_omlx_url}/health",
                 timeout=self.config.health_check_timeout_seconds,
             )
-            status_task = self.client.get(
-                f"{self.config.local_omlx_url}/v1/models/status",
+            models_task = self.client.get(
+                f"{self.config.local_omlx_url}/v1/models",
                 headers=self._local_omlx_headers(),
                 timeout=self.config.health_check_timeout_seconds,
             )
-            health_response, status_response = await asyncio.gather(health_task, status_task)
+            health_response, models_response = await asyncio.gather(health_task, models_task)
             health_response.raise_for_status()
-            status_response.raise_for_status()
-            health_data = health_response.json()
-            loaded_models = self._extract_loaded_models(health_data, status_response.json())
+            models_response.raise_for_status()
+            available_models = self._extract_available_models(models_response.json())
             healthy = True
         except Exception:  # noqa: BLE001
             healthy = False
@@ -134,7 +133,7 @@ class NodeHealthMonitor:
             node_id=peer.node_id,
             tailscale_ip=peer.tailscale_ip,
             router_url=peer.router_url,
-            models=loaded_models or list(self.config.local_models),
+            models=available_models or list(self.config.local_models),
             in_flight=inflight,
             max_concurrent=self.config.local_max_concurrent,
             healthy=healthy,
@@ -177,25 +176,25 @@ class NodeHealthMonitor:
         return {"Authorization": f"Bearer {self.config.local_omlx_api_key}"}
 
     @staticmethod
-    def _extract_loaded_models(health_data: dict[str, Any], status_data: Any) -> list[str]:
-        """Extract loaded model IDs from oMLX health/status endpoints."""
-        loaded = health_data.get("loaded_models")
-        if isinstance(loaded, list) and loaded:
-            return [str(model) for model in loaded]
+    def _extract_available_models(models_data: Any) -> list[str]:
+        """Extract all available model IDs from oMLX /v1/models endpoint.
 
-        if isinstance(status_data, dict):
-            items = status_data.get("data") or status_data.get("models") or []
-        elif isinstance(status_data, list):
-            items = status_data
+        oMLX loads models on demand, so all models reported by /v1/models are
+        servable — not just ones currently resident in memory.
+        """
+        if isinstance(models_data, dict):
+            items = models_data.get("data") or models_data.get("models") or []
+        elif isinstance(models_data, list):
+            items = models_data
         else:
             items = []
 
         results: list[str] = []
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("loaded"):
+            if isinstance(item, dict):
                 model_id = item.get("id")
                 if model_id:
                     results.append(str(model_id))
+            elif isinstance(item, str) and item:
+                results.append(item)
         return results

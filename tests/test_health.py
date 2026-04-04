@@ -16,9 +16,12 @@ def make_transport_handler(remote_behavior):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url == "http://127.0.0.1:5741/health":
-            return httpx.Response(200, json={"loaded_models": [LOCAL_MODEL]})
-        if url == "http://127.0.0.1:5741/v1/models/status":
-            return httpx.Response(200, json={"data": [{"id": LOCAL_MODEL, "loaded": True}]})
+            return httpx.Response(200, json={"status": "healthy"})
+        if url == "http://127.0.0.1:5741/v1/models":
+            return httpx.Response(200, json={
+                "object": "list",
+                "data": [{"id": LOCAL_MODEL, "object": "model"}],
+            })
         if url == "http://100.64.0.2:8741/v1/node-info":
             return remote_behavior(request)
         raise AssertionError(f"Unexpected request: {url}")
