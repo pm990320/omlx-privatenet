@@ -38,17 +38,19 @@ HF_BIN=""
 NODE_ID=""
 OMLX_API_KEY=""
 EXISTING_OMLX="false"      # true when oMLX is already running and managed externally
+OPENCLAW_BIN=""             # path to openclaw CLI, empty if not found
+INSTALL_OPENCLAW="false"    # true when user opts in to plugin install
 STEP=0
 TOTAL_STEPS=0               # computed dynamically
 
-# ── Colours ──────────────────────────────────────────────────────────────────
-BOLD='\033[1m'
-DIM='\033[2m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
+# ── Non-interactive / CI mode ────────────────────────────────────────────────
+# Set NONINTERACTIVE=1 to skip all prompts (defaults to no for optional steps).
+# Override specific choices with environment variables:
+#   OMLX_PRIVATENET_INSTALL_OPENCLAW=1   Install the OpenClaw plugin without asking
+#   OMLX_PRIVATENET_INSTALL_OPENCLAW=0   Skip the OpenClaw plugin without asking
+NONINTERACTIVE="${NONINTERACTIVE:-0}"
+
+# ── Colours (used inline via printf escape codes) ────────────────────────────
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 step() {
@@ -172,6 +174,118 @@ except Exception:
 }
 
 # ── Compute step count ───────────────────────────────────────────────────────
+# ── OpenClaw integration ──────────────────────────────────────────────────────
+detect_openclaw() {
+  # Check common locations for the openclaw CLI
+  for candidate in \
+    "$(command -v openclaw 2>/dev/null || true)" \
+    "$HOME/.local/bin/openclaw" \
+    "/usr/local/bin/openclaw" \
+    "$HOME/openclaw/openclaw/openclaw" \
+    ; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      OPENCLAW_BIN="$candidate"
+      return
+    fi
+  done
+}
+
+ask_openclaw_plugin() {
+  if [ -z "$OPENCLAW_BIN" ]; then
+    return
+  fi
+
+  # Check for env var override (works in both interactive and non-interactive modes)
+  local env_override="${OMLX_PRIVATENET_INSTALL_OPENCLAW:-}"
+  if [ "$env_override" = "1" ] || [ "$env_override" = "true" ] || [ "$env_override" = "yes" ]; then
+    INSTALL_OPENCLAW="true"
+    return
+  fi
+  if [ "$env_override" = "0" ] || [ "$env_override" = "false" ] || [ "$env_override" = "no" ]; then
+    return
+  fi
+
+  # In non-interactive mode with no explicit override, skip
+  if [ "$NONINTERACTIVE" = "1" ]; then
+    info "OpenClaw detected but skipping plugin install (non-interactive mode)."
+    info "Set OMLX_PRIVATENET_INSTALL_OPENCLAW=1 to install automatically."
+    return
+  fi
+
+  printf '\n'
+  printf '  \033[1mOpenClaw detected!\033[0m\n'
+  printf '  The openclaw-omlx plugin lets OpenClaw use your PrivateNet models.\n'
+  printf '  It will configure OpenClaw to connect to the router on this Mac.\n'
+  printf '\n'
+  printf '  \033[1mInstall the openclaw-omlx plugin? [Y/n]\033[0m '
+  local answer
+  read -r answer
+  case "$answer" in
+    [nN]|[nN][oO])
+      info "Skipping OpenClaw plugin."
+      ;;
+    *)
+      INSTALL_OPENCLAW="true"
+      ;;
+  esac
+}
+
+install_openclaw_plugin() {
+  # Check if already installed
+  local already_installed="false"
+  if "$OPENCLAW_BIN" plugins list 2>/dev/null | grep -q "omlx"; then
+    already_installed="true"
+  fi
+
+  if [ "$already_installed" = "true" ]; then
+    info "openclaw-omlx plugin is already installed — updating configuration..."
+  else
+    info "Installing the openclaw-omlx plugin..."
+    if ! "$OPENCLAW_BIN" plugins install openclaw-omlx 2>&1; then
+      warn "Plugin install failed. You can install it manually later with:"
+      warn "  openclaw plugins install openclaw-omlx"
+      return
+    fi
+    success "openclaw-omlx plugin installed."
+  fi
+
+  # Configure the plugin to point at the router
+  local router_url="http://${TAILSCALE_IP}:8741/v1"
+  local openclaw_config="$HOME/.openclaw/openclaw.json"
+
+  if [ -f "$openclaw_config" ]; then
+    info "Configuring plugin to use router at $router_url..."
+    python3 -c '
+import json, sys
+
+config_path = sys.argv[1]
+router_url = sys.argv[2]
+api_key = sys.argv[3]
+
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+plugins = config.setdefault("plugins", {})
+entries = plugins.setdefault("entries", {})
+omlx = entries.setdefault("omlx", {})
+omlx["enabled"] = True
+omlx_config = omlx.setdefault("config", {})
+omlx_config["baseUrl"] = router_url
+if api_key:
+    omlx_config["apiKey"] = api_key
+
+with open(config_path, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+' "$openclaw_config" "$router_url" "$OMLX_API_KEY"
+    success "OpenClaw configured to use PrivateNet router at $router_url"
+  else
+    warn "Could not find openclaw.json at $openclaw_config"
+    warn "After installing OpenClaw, configure the plugin manually:"
+    warn "  baseUrl: $router_url"
+  fi
+}
+
 compute_steps() {
   # Steps that always run:
   #  1. Check Mac
@@ -195,6 +309,10 @@ compute_steps() {
     #  +1 Download router code
     #  +1 Set up Python environment (router deps only)
     TOTAL_STEPS=$((TOTAL_STEPS + 2))
+  fi
+
+  if [ "$INSTALL_OPENCLAW" = "true" ]; then
+    TOTAL_STEPS=$((TOTAL_STEPS + 1))
   fi
 }
 
@@ -339,6 +457,9 @@ ensure_tailscale_ip() {
     info "Tailscale needs to be connected before we can continue."
     info "A sign-in window may have opened in your browser."
     printf '\n'
+    if [ "$NONINTERACTIVE" = "1" ]; then
+      die "Tailscale is not connected and installer is running in non-interactive mode. Connect Tailscale first."
+    fi
     printf '      1. Sign in to Tailscale (or create a free account) in the browser window.\n'
     printf '      2. Wait until the Tailscale menu bar icon shows "Connected".\n'
     printf '      3. Come back here and press Enter.\n\n'
@@ -772,6 +893,11 @@ print_summary() {
     printf '  \033[0;32mThis Mac is already advertising the Tailscale tag %s.\033[0m\n' "$TAILSCALE_TAG"
     printf '\n'
   fi
+  if [ "$INSTALL_OPENCLAW" = "true" ]; then
+    printf '  \033[0;32mOpenClaw is configured to use PrivateNet.\033[0m\n'
+    printf '  Restart OpenClaw to pick up the new plugin.\n'
+    printf '\n'
+  fi
   printf '  \033[1mNext step:\033[0m Point OpenClaw (or any OpenAI-compatible client) at:\n'
   printf '  \033[2mhttp://%s:8741/v1\033[0m\n' "$TAILSCALE_IP"
   printf '\n'
@@ -828,6 +954,10 @@ main() {
   printf '\n'
   printf '  \033[2mSafe to re-run — it will skip anything already installed.\033[0m\n'
   printf '\n'
+
+  # Check for OpenClaw and ask about plugin before computing steps
+  detect_openclaw
+  ask_openclaw_plugin
 
   compute_steps
 
@@ -932,6 +1062,12 @@ main() {
   else
     warn "Router hasn't responded yet — it may need a few more seconds."
     warn "Check the logs at: $STATE_DIR/logs/router.stderr.log"
+  fi
+
+  # ── OpenClaw plugin ───────────────────────────────────────────────────
+  if [ "$INSTALL_OPENCLAW" = "true" ]; then
+    step "Setting up OpenClaw" "Installing the openclaw-omlx plugin so OpenClaw can use your PrivateNet models."
+    install_openclaw_plugin
   fi
 
   print_summary
