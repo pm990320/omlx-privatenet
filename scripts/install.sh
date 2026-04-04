@@ -52,7 +52,20 @@ NONINTERACTIVE="${NONINTERACTIVE:-0}"
 
 # ── Colours (used inline via printf escape codes) ────────────────────────────
 
+# ── Auto-detect non-interactive mode ──────────────────────────────────────────
+# If /dev/tty isn't available (e.g. CI, cron), force non-interactive
+if ! : < /dev/tty 2>/dev/null; then
+  NONINTERACTIVE="1"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
+# Read a line from the user's terminal (works even when stdin is piped)
+prompt_read() {
+  if [ "$NONINTERACTIVE" = "1" ]; then
+    return 1
+  fi
+  read -r "$@" < /dev/tty
+}
 step() {
   STEP=$((STEP + 1))
   printf '\n\033[1m\033[0;36m[%d/%d]\033[0m \033[1m%s\033[0m\n' "$STEP" "$TOTAL_STEPS" "$1"
@@ -218,8 +231,8 @@ ask_openclaw_plugin() {
   printf '  It will configure OpenClaw to connect to the router on this Mac.\n'
   printf '\n'
   printf '  \033[1mInstall the openclaw-omlx plugin? [Y/n]\033[0m '
-  local answer
-  read -r answer < /dev/tty
+  local answer=""
+  prompt_read answer || true
   case "$answer" in
     [nN]|[nN][oO])
       info "Skipping OpenClaw plugin."
@@ -498,7 +511,7 @@ ensure_tailscale_ip() {
     printf '      up, ask them to invite you from the Tailscale admin console.\n'
     printf '\n'
     printf '      Press Enter when Tailscale shows "Connected".\n\n'
-    read -r < /dev/tty
+    prompt_read || true
     TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
   fi
 
@@ -546,8 +559,8 @@ except Exception:
     do_tag="true"
   else
     printf '  \033[1mAdd the %s tag to this Mac? [Y/n]\033[0m ' "$TAILSCALE_TAG"
-    local answer
-    read -r answer < /dev/tty
+    local answer=""
+    prompt_read answer || true
     case "$answer" in
       [nN]|[nN][oO]) do_tag="false" ;;
       *) do_tag="true" ;;
@@ -875,31 +888,24 @@ write_start_scripts() {
   )"
   write_text_file "$STATE_DIR/bin/privatenet" 0755 "$cli_content"
 
-  # Add to PATH via shell profile if not already there
+  # Symlink into a directory already on PATH so it works immediately
   local bin_dir="$STATE_DIR/bin"
-  local path_line="export PATH=\"$bin_dir:\$PATH\""
-  local profile=""
+  local symlinked="false"
+  for link_dir in \
+    /opt/homebrew/bin \
+    /usr/local/bin \
+    ; do
+    if [ -d "$link_dir" ] && [ -w "$link_dir" ]; then
+      ln -sf "$bin_dir/privatenet" "$link_dir/privatenet"
+      success "privatenet command available (symlinked to $link_dir/privatenet)"
+      symlinked="true"
+      break
+    fi
+  done
 
-  # Detect the right shell profile
-  if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
-    profile="$HOME/.zprofile"
-  elif [ -f "$HOME/.bash_profile" ]; then
-    profile="$HOME/.bash_profile"
-  else
-    profile="$HOME/.profile"
-  fi
-
-  if ! grep -qF "$bin_dir" "$profile" 2>/dev/null; then
-    printf '\n# oMLX PrivateNet CLI\n%s\n' "$path_line" >> "$profile"
-    success "Added $bin_dir to PATH in $profile"
-    info "Run 'source $profile' or open a new terminal to use the 'privatenet' command."
-  else
-    success "privatenet command is already on PATH."
-  fi
-
-  # Also try /usr/local/bin symlink as a convenience
-  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    ln -sf "$bin_dir/privatenet" /usr/local/bin/privatenet
+  if [ "$symlinked" = "false" ]; then
+    warn "Could not symlink privatenet into a directory on your PATH."
+    warn "Run it directly: $bin_dir/privatenet status"
   fi
 }
 
