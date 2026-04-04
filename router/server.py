@@ -101,13 +101,24 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
+        """Aggregate model catalog across all healthy nodes in the cluster.
+
+        Returns the same schema as oMLX's ``/v1/models`` — a drop-in
+        replacement so clients see a unified model list.
+        """
+        import time
+
+        now = int(time.time())
+        all_models = router.aggregate_models()
+
         data = [
             {
                 "id": model,
                 "object": "model",
+                "created": now,
                 "owned_by": "omlx-privatenet",
             }
-            for model in router.aggregate_models()
+            for model in all_models
         ]
         return {"object": "list", "data": data}
 
