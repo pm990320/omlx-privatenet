@@ -81,10 +81,16 @@ write_text_file() {
   local mode="$2"
   local content="$3"
   python3 -c '
-from pathlib import Path; import sys
+import os, sys
+from pathlib import Path
 p = Path(sys.argv[1]).expanduser()
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(sys.argv[3], encoding="utf-8")
+p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+# Write with restrictive umask so file is never world-readable, even briefly
+old_umask = os.umask(0o177)  # creates files as 0600
+try:
+    p.write_text(sys.argv[3], encoding="utf-8")
+finally:
+    os.umask(old_umask)
 p.chmod(int(sys.argv[2], 8))
 ' "$path" "$mode" "$content"
 }
@@ -628,7 +634,7 @@ write_start_scripts() {
       "source \"$VENV_DIR/bin/activate\"" \
       "exec omlx serve --base-path \"$OMLX_BASE\" --host \"127.0.0.1\" --port \"5741\" --model-dir \"$MODEL_DIR\" --api-key \"$OMLX_API_KEY\"" \
     )"
-    write_text_file "$OMLX_START_SCRIPT" 0755 "$omlx_content"
+    write_text_file "$OMLX_START_SCRIPT" 0700 "$omlx_content"
   fi
 
   local router_content
@@ -639,7 +645,7 @@ write_start_scripts() {
     "cd \"$PRIVATENET_SRC\"" \
     "exec python -m router.server --config \"$ROUTER_CONFIG\" --host \"0.0.0.0\" --port \"8741\"" \
   )"
-  write_text_file "$ROUTER_START_SCRIPT" 0755 "$router_content"
+  write_text_file "$ROUTER_START_SCRIPT" 0700 "$router_content"
 
   # CLI tool for enable/disable/status
   local cli_content

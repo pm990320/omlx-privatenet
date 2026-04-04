@@ -92,8 +92,9 @@ def cmd_disable(_args: argparse.Namespace) -> int:
         print(f"\n  {YELLOW}Node {node_id} is already disabled.{RESET}\n")
         return 0
 
-    _state_dir().mkdir(parents=True, exist_ok=True)
-    _disabled_file().write_text(f"Disabled by CLI\n", encoding="utf-8")
+    _state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+    _disabled_file().write_text("Disabled by CLI\n", encoding="utf-8")
+    _disabled_file().chmod(0o600)
 
     print(f"\n  {RED}Node {node_id} is now disabled.{RESET}")
     print(f"  {DIM}Peers will stop routing requests here within ~30 seconds.{RESET}")

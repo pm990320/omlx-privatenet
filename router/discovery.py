@@ -2,10 +2,14 @@ from __future__ import annotations
 
 """Peer discovery via ``tailscale status --json``."""
 
+import ipaddress
 import json
 import subprocess
 from dataclasses import dataclass
 from typing import Any
+
+# Tailscale uses the CGNAT range 100.64.0.0/10 for all node addresses
+_TAILSCALE_CIDR = ipaddress.IPv4Network("100.64.0.0/10")
 
 from .config import RouterConfig
 
@@ -111,11 +115,18 @@ class TailscaleDiscovery:
 
     @staticmethod
     def _pick_ipv4(value: Any) -> str | None:
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, str) and ":" not in item:
+        """Pick the first valid Tailscale IPv4 address from a list.
+
+        Only accepts addresses in the Tailscale CGNAT range (100.64.0.0/10)
+        to prevent SSRF via spoofed discovery data.
+        """
+        candidates = [value] if isinstance(value, str) else (value if isinstance(value, list) else [])
+        for item in candidates:
+            if not isinstance(item, str) or ":" in item:
+                continue
+            try:
+                if ipaddress.IPv4Address(item) in _TAILSCALE_CIDR:
                     return item
-            return None
-        if isinstance(value, str) and ":" not in value:
-            return value
+            except ValueError:
+                continue
         return None

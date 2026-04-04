@@ -91,7 +91,8 @@ async def test_chat_completions_proxy_to_selected_node(app_factory, make_node):
     assert captured["url"] == "http://100.64.0.2:8741/v1/chat/completions"
     assert captured["headers"]["x-omlx-router-local-only"] == "1"
     assert captured["headers"]["x-omlx-routed-by"] == "local-node"
-    assert captured["headers"]["authorization"] == "Bearer shared-key"
+    # Client auth must NOT be forwarded to peers (security: prevents credential leakage)
+    assert "authorization" not in captured["headers"]
 
 
 @pytest.mark.asyncio

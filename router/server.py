@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import os
 import plistlib
 import subprocess
@@ -382,10 +383,14 @@ def _local_omlx_headers(config: RouterConfig) -> dict[str, str]:
 
 
 def _peer_headers(request: Request, config: RouterConfig) -> dict[str, str]:
+    """Build headers for peer-to-peer forwarding.
+
+    Uses the router's own API key (if configured) rather than forwarding
+    the client's auth header to untrusted peers.
+    """
     headers: dict[str, str] = {}
-    auth = request.headers.get("authorization")
-    if auth:
-        headers["Authorization"] = auth
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
     headers[LOCAL_ONLY_HEADER] = "1"
     headers[ROUTED_BY_HEADER] = config.local_node_id
     return headers
@@ -396,7 +401,7 @@ def _require_router_api_key(request: Request, config: RouterConfig) -> None:
         return
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {config.api_key}"
-    if auth != expected:
+    if not hmac.compare_digest(auth.encode(), expected.encode()):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing router API key.",
