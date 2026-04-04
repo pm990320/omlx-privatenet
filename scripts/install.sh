@@ -367,7 +367,7 @@ ensure_repos() {
       info "oMLX source already exists — updating to $OMLX_REF..."
       git -C "$OMLX_SRC" remote set-url origin "$OMLX_REPO"
       git -C "$OMLX_SRC" fetch --tags origin
-      git -C "$OMLX_SRC" checkout "$OMLX_REF"
+      git -C "$OMLX_SRC" checkout -f "$OMLX_REF"
       success "oMLX updated."
     elif [ -e "$OMLX_SRC" ]; then
       die "$OMLX_SRC already exists but isn't a proper install. Please delete or move that folder, then re-run."
@@ -382,8 +382,9 @@ ensure_repos() {
     info "PrivateNet router source already exists — updating to $PRIVATENET_REF..."
     git -C "$PRIVATENET_SRC" remote set-url origin "$PRIVATENET_REPO"
     git -C "$PRIVATENET_SRC" fetch origin
-    git -C "$PRIVATENET_SRC" checkout "$PRIVATENET_REF"
-    git -C "$PRIVATENET_SRC" pull --ff-only origin "$PRIVATENET_REF"
+    # This is a managed checkout — discard any local changes and force-update
+    git -C "$PRIVATENET_SRC" checkout -f "$PRIVATENET_REF"
+    git -C "$PRIVATENET_SRC" reset --hard "origin/$PRIVATENET_REF"
     success "PrivateNet router updated."
   elif [ -e "$PRIVATENET_SRC" ]; then
     die "$PRIVATENET_SRC already exists but isn't a proper git checkout. Please delete or move that folder, then re-run."
@@ -651,14 +652,31 @@ write_start_scripts() {
   )"
   write_text_file "$STATE_DIR/bin/privatenet" 0755 "$cli_content"
 
-  # Symlink into /usr/local/bin if possible, so it's on PATH without venv activation
-  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    ln -sf "$STATE_DIR/bin/privatenet" /usr/local/bin/privatenet
-    success "privatenet command installed to /usr/local/bin/privatenet"
+  # Add to PATH via shell profile if not already there
+  local bin_dir="$STATE_DIR/bin"
+  local path_line="export PATH=\"$bin_dir:\$PATH\""
+  local profile=""
+
+  # Detect the right shell profile
+  if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
+    profile="$HOME/.zprofile"
+  elif [ -f "$HOME/.bash_profile" ]; then
+    profile="$HOME/.bash_profile"
   else
-    success "privatenet command installed to $STATE_DIR/bin/privatenet"
-    info "Add $STATE_DIR/bin to your PATH, or run it directly:"
-    info "  $STATE_DIR/bin/privatenet status"
+    profile="$HOME/.profile"
+  fi
+
+  if ! grep -qF "$bin_dir" "$profile" 2>/dev/null; then
+    printf '\n# oMLX PrivateNet CLI\n%s\n' "$path_line" >> "$profile"
+    success "Added $bin_dir to PATH in $profile"
+    info "Run 'source $profile' or open a new terminal to use the 'privatenet' command."
+  else
+    success "privatenet command is already on PATH."
+  fi
+
+  # Also try /usr/local/bin symlink as a convenience
+  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    ln -sf "$bin_dir/privatenet" /usr/local/bin/privatenet
   fi
 }
 
