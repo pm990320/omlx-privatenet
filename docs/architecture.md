@@ -63,7 +63,7 @@ Every router exposes the state of its **local** oMLX instance:
 
 ```json
 {
-  "node_id": "macbook-patrick",
+  "node_id": "my-mac-studio",
   "tailscale_ip": "100.x.y.z",
   "models": ["gemma-4-26b-a4b-it-4bit", "gemma-4-31b-it-4bit"],
   "in_flight": 2,

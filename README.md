@@ -173,7 +173,7 @@ Example:
   "health_check_timeout_seconds": 5,
   "failure_threshold": 3,
   "overload_threshold": null,
-  "local_node_id": "macbook-patrick",
+  "local_node_id": "my-mac-studio",
   "local_tailscale_ip": "100.64.0.10",
   "local_omlx_url": "http://127.0.0.1:5741",
   "local_omlx_api_key": "pn-local-omlx-key",

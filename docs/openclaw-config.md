@@ -50,7 +50,7 @@ Replace:
 
 ```json
 {
-  "baseUrl": "http://macbook-patrick.tailnet-name.ts.net:8741/v1",
+  "baseUrl": "http://my-mac-studio.tailnet-name.ts.net:8741/v1",
   "apiKey": "optional-shared-router-api-key",
   "api": "openai-completions"
 }
