@@ -1,0 +1,12 @@
+{
+  "host": "0.0.0.0",
+  "port": 8741,
+  "api_key": "change-me-balancer-api-key",
+  "health_interval_seconds": 30,
+  "connect_timeout_seconds": 10,
+  "request_timeout_seconds": 600,
+  "prefix_message_count": 3,
+  "sticky_ttl_seconds": 43200,
+  "default_max_inflight": 2,
+  "cluster_file": "../cluster.json"
+}

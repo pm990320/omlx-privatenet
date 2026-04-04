@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local balancer/runtime config
+cluster.json
+balancer/config.json
+
+# macOS
+.DS_Store
+
+# Logs and runtime files
+*.log
+*.pid
+*.sock
+
+# Editor
+.vscode/
+.idea/
