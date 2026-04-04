@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Deterministic request routing for PrivateNet peers."""
+
 import bisect
 import hashlib
 import json
@@ -18,6 +20,8 @@ METADATA_SESSION_KEYS = SESSION_KEYS + ("session", "conversation")
 
 @dataclass(slots=True)
 class NodeInfo:
+    """Live metadata describing one router peer."""
+
     node_id: str
     tailscale_ip: str
     router_url: str
@@ -32,11 +36,14 @@ class NodeInfo:
     online: bool = True
 
     def supports_model(self, model: str) -> bool:
+        """Return whether this node can serve ``model``."""
         return model in self.models
 
 
 @dataclass(slots=True)
 class RouteDecision:
+    """The outcome of selecting an upstream node for a request."""
+
     selected: NodeInfo
     primary: NodeInfo
     ordered_candidates: list[NodeInfo]
@@ -48,6 +55,8 @@ class RouteDecision:
 
 
 class ConsistentHashRouter:
+    """Pick stable nodes for chat and embedding requests."""
+
     def __init__(
         self,
         *,
@@ -66,6 +75,7 @@ class ConsistentHashRouter:
         self._ring_cache: dict[tuple[str, tuple[str, ...]], list[tuple[int, str]]] = {}
 
     def update_nodes(self, nodes: Iterable[NodeInfo]) -> None:
+        """Replace the router's current cluster view."""
         with self._lock:
             refreshed = {node.node_id: node for node in nodes}
             self._nodes = refreshed
@@ -75,6 +85,7 @@ class ConsistentHashRouter:
             self._ring_cache.clear()
 
     def mark_node_unhealthy(self, node_id: str, error: str | None = None) -> None:
+        """Mark a node unhealthy without removing it from the cluster view."""
         with self._lock:
             node = self._nodes.get(node_id)
             if not node:
@@ -82,6 +93,7 @@ class ConsistentHashRouter:
             self._nodes[node_id] = replace(node, healthy=False, last_error=error)
 
     def bump_inflight(self, node_id: str, delta: int) -> None:
+        """Apply an optimistic in-flight adjustment for a node."""
         if delta == 0:
             return
         with self._lock:
@@ -94,26 +106,32 @@ class ConsistentHashRouter:
                 self._inflight_adjustments[node_id] = next_value
 
     def release(self, node_id: str) -> None:
+        """Release one optimistic in-flight slot from ``node_id``."""
         self.bump_inflight(node_id, -1)
 
     def get_node(self, node_id: str) -> NodeInfo | None:
+        """Return the effective state for one node, including in-flight deltas."""
         with self._lock:
             node = self._nodes.get(node_id)
             if not node:
                 return None
             return self._effective_node(node)
 
-    def aggregate_models(self) -> list[str]:
+    def aggregate_models(self, *, healthy_only: bool = False) -> list[str]:
+        """Return the sorted union of models across the cluster."""
         with self._lock:
-            models = {model for node in self._nodes.values() for model in node.models}
+            nodes = [node for node in self._nodes.values() if node.healthy] if healthy_only else list(self._nodes.values())
+            models = {model for node in nodes for model in node.models}
         return sorted(models)
 
     def snapshot(self) -> dict[str, Any]:
+        """Return a serializable snapshot of the current cluster."""
         with self._lock:
             nodes = [self._node_to_dict(self._effective_node(node)) for node in sorted(self._nodes.values(), key=lambda item: item.node_id)]
         return {"nodes": nodes}
 
     def route_chat(self, payload: dict[str, Any]) -> RouteDecision:
+        """Route a chat completion payload using sticky affinity then failover."""
         model = str(payload.get("model") or "").strip()
         if not model:
             raise ValueError("`model` is required.")
@@ -171,6 +189,7 @@ class ConsistentHashRouter:
         )
 
     def route_embeddings(self, payload: dict[str, Any]) -> RouteDecision:
+        """Route embeddings requests by least load across healthy nodes."""
         model = str(payload.get("model") or "").strip()
         if not model:
             raise ValueError("`model` is required.")

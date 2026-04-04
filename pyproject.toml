@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+addopts = "--cov=router --cov-report=term-missing --cov-report=html --cov-fail-under=80"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+source = ["router"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

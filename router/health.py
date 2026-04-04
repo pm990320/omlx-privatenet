@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Cluster discovery and peer health monitoring."""
+
 import asyncio
 import time
 from dataclasses import replace
@@ -13,6 +15,8 @@ from .router import ConsistentHashRouter, NodeInfo
 
 
 class NodeHealthMonitor:
+    """Maintain a live view of healthy PrivateNet peers."""
+
     def __init__(self, config: RouterConfig, router: ConsistentHashRouter, client: httpx.AsyncClient) -> None:
         self.config = config
         self.router = router
@@ -25,6 +29,7 @@ class NodeHealthMonitor:
         self._failures: dict[str, int] = {}
 
     async def run_forever(self) -> None:
+        """Continuously refresh discovery and health state."""
         while not self._stop.is_set():
             await self.run_once()
             try:
@@ -33,9 +38,11 @@ class NodeHealthMonitor:
                 continue
 
     async def stop(self) -> None:
+        """Request the background health loop to exit."""
         self._stop.set()
 
     async def run_once(self) -> None:
+        """Run one discovery and probe cycle."""
         discovered = await asyncio.to_thread(self.discovery.discover)
         self._known_peers = {peer.node_id: peer for peer in discovered}
         self._failures = {node_id: count for node_id, count in self._failures.items() if node_id in self._known_peers}
@@ -47,6 +54,7 @@ class NodeHealthMonitor:
         self.router.update_nodes(nodes)
 
     async def current_local_node_info(self) -> NodeInfo:
+        """Return a freshly probed view of the local node."""
         peer = self._known_peers.get(self.config.local_node_id)
         if peer is None:
             discovered = await asyncio.to_thread(self.discovery.discover)
@@ -68,6 +76,8 @@ class NodeHealthMonitor:
             failures = self._failures.get(peer.node_id, 0) + 1
             self._failures[peer.node_id] = failures
             last = self._last_nodes.get(peer.node_id)
+            if failures >= self.config.failure_threshold:
+                return None
             if last is None:
                 models = list(self.config.local_models) if peer.local else []
                 max_concurrent = self.config.local_max_concurrent if peer.local else (self.config.overload_threshold or 1)
@@ -97,7 +107,6 @@ class NodeHealthMonitor:
         return replace(node, consecutive_failures=0, last_error=None, online=peer.online)
 
     async def _probe_local_peer(self, peer: DiscoveredPeer) -> NodeInfo:
-        started = time.perf_counter()
         healthy = False
         loaded_models: list[str] = []
         try:
@@ -121,24 +130,11 @@ class NodeHealthMonitor:
 
         node = self.router.get_node(peer.node_id)
         inflight = node.in_flight if node else 0
-        _ = started  # reserved for future latency reporting
         return NodeInfo(
             node_id=peer.node_id,
             tailscale_ip=peer.tailscale_ip,
             router_url=peer.router_url,
-            models=list(self.config.local_models),
-            in_flight=inflight,
-            max_concurrent=self.config.local_max_concurrent,
-            healthy=healthy,
-            uptime_seconds=int(time.time() - self.started_at),
-            local=True,
-            online=True,
-            last_error=(None if healthy else "local oMLX did not respond in time"),
-        ) if not loaded_models else NodeInfo(
-            node_id=peer.node_id,
-            tailscale_ip=peer.tailscale_ip,
-            router_url=peer.router_url,
-            models=loaded_models,
+            models=loaded_models or list(self.config.local_models),
             in_flight=inflight,
             max_concurrent=self.config.local_max_concurrent,
             healthy=healthy,
@@ -182,6 +178,7 @@ class NodeHealthMonitor:
 
     @staticmethod
     def _extract_loaded_models(health_data: dict[str, Any], status_data: Any) -> list[str]:
+        """Extract loaded model IDs from oMLX health/status endpoints."""
         loaded = health_data.get("loaded_models")
         if isinstance(loaded, list) and loaded:
             return [str(model) for model in loaded]

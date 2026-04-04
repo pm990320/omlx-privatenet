@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Configuration loading for the oMLX PrivateNet router."""
+
 import json
 import os
 import socket
@@ -8,14 +10,17 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path.home() / ".omlx-privatenet" / "router.json"
-DEFAULT_LOCAL_MODELS = [
+DEFAULT_LOCAL_MODELS = (
     "gemma-4-26b-a4b-it-4bit",
     "gemma-4-31b-it-4bit",
-]
+)
+ENV_PREFIX = "OMLX_PRIVATENET_ROUTER_"
 
 
 @dataclass(slots=True)
 class RouterConfig:
+    """Runtime configuration for a router instance."""
+
     host: str = "0.0.0.0"
     port: int = 8741
     api_key: str | None = None
@@ -39,6 +44,7 @@ class RouterConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, source_path: Path | None = None) -> "RouterConfig":
+        """Build a config object from decoded JSON-like data."""
         local_models = data.get("local_models") or list(DEFAULT_LOCAL_MODELS)
         if not isinstance(local_models, list) or not local_models:
             raise ValueError("`local_models` must be a non-empty JSON array.")
@@ -73,18 +79,61 @@ def _read_json(path: Path) -> Any:
         return json.load(handle)
 
 
+def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
+    overrides = dict(data)
+    env_to_field = {
+        f"{ENV_PREFIX}HOST": "host",
+        f"{ENV_PREFIX}PORT": "port",
+        f"{ENV_PREFIX}API_KEY": "api_key",
+        f"{ENV_PREFIX}CONNECT_TIMEOUT_SECONDS": "connect_timeout_seconds",
+        f"{ENV_PREFIX}REQUEST_TIMEOUT_SECONDS": "request_timeout_seconds",
+        f"{ENV_PREFIX}DISCOVERY_INTERVAL_SECONDS": "discovery_interval_seconds",
+        f"{ENV_PREFIX}HEALTH_CHECK_TIMEOUT_SECONDS": "health_check_timeout_seconds",
+        f"{ENV_PREFIX}FAILURE_THRESHOLD": "failure_threshold",
+        f"{ENV_PREFIX}PREFIX_MESSAGE_COUNT": "prefix_message_count",
+        f"{ENV_PREFIX}OVERLOAD_THRESHOLD": "overload_threshold",
+        f"{ENV_PREFIX}CONSISTENT_HASH_REPLICAS": "consistent_hash_replicas",
+        f"{ENV_PREFIX}TAILSCALE_TAG": "tailscale_tag",
+        f"{ENV_PREFIX}TAILSCALE_BIN": "tailscale_bin",
+        f"{ENV_PREFIX}LOCAL_NODE_ID": "local_node_id",
+        f"{ENV_PREFIX}LOCAL_TAILSCALE_IP": "local_tailscale_ip",
+        f"{ENV_PREFIX}LOCAL_OMLX_URL": "local_omlx_url",
+        f"{ENV_PREFIX}LOCAL_OMLX_API_KEY": "local_omlx_api_key",
+        f"{ENV_PREFIX}LOCAL_MODELS": "local_models",
+        f"{ENV_PREFIX}LOCAL_MAX_CONCURRENT": "local_max_concurrent",
+    }
+
+    for env_name, field_name in env_to_field.items():
+        raw_value = os.getenv(env_name)
+        if raw_value is None:
+            continue
+        if field_name == "local_models":
+            overrides[field_name] = [item.strip() for item in raw_value.split(",") if item.strip()]
+        elif field_name == "overload_threshold":
+            value = raw_value.strip()
+            overrides[field_name] = None if value.lower() in {"", "none", "null"} else int(value)
+        else:
+            overrides[field_name] = raw_value
+
+    return overrides
+
+
 def resolve_config_path(config_path: str | Path | None = None) -> Path:
+    """Resolve the effective config path, honoring legacy env overrides."""
     env_path = os.getenv("OMLX_PRIVATENET_ROUTER_CONFIG") or os.getenv("OMLX_PRIVATENET_CONFIG")
     raw = config_path or env_path or DEFAULT_CONFIG_PATH
     return Path(raw).expanduser().resolve()
 
 
 def load_config(config_path: str | Path | None = None) -> RouterConfig:
+    """Load config from disk plus supported environment overrides."""
     path = resolve_config_path(config_path)
-    if not path.exists():
-        return RouterConfig(source_path=path)
+    raw: dict[str, Any] = {}
+    if path.exists():
+        decoded = _read_json(path)
+        if not isinstance(decoded, dict):
+            raise ValueError("Router config must be a JSON object.")
+        raw = decoded
 
-    raw = _read_json(path)
-    if not isinstance(raw, dict):
-        raise ValueError("Router config must be a JSON object.")
+    raw = _apply_env_overrides(raw)
     return RouterConfig.from_dict(raw, source_path=path)

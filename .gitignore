@@ -7,10 +7,11 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.coverage
+htmlcov/
 
-# Local balancer/runtime config
-cluster.json
-balancer/config.json
+# Local router/runtime config
+router/config.json
 
 # macOS
 .DS_Store

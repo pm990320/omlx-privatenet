@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+"""FastAPI application exposing the PrivateNet router API."""
+
 import argparse
 import asyncio
 import os
 import plistlib
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable
@@ -13,7 +16,7 @@ from typing import Any, AsyncIterator, Iterable
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import RouterConfig, load_config, resolve_config_path
 from .health import NodeHealthMonitor
@@ -36,6 +39,7 @@ LAUNCH_AGENT_LABEL = "com.omlx-privatenet.router"
 
 
 def create_app(config_path: str | Path | None = None) -> FastAPI:
+    """Create the FastAPI application for the router service."""
     config = load_config(config_path)
     timeout = httpx.Timeout(
         connect=config.connect_timeout_seconds,
@@ -78,11 +82,15 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def enforce_auth(request: Request, call_next):  # type: ignore[override]
         if request.url.path in {"/health", "/v1/node-info"}:
             return await call_next(request)
-        _require_router_api_key(request, config)
+        try:
+            _require_router_api_key(request, config)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
         return await call_next(request)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        """Return local router status plus the currently known cluster view."""
         return {
             "status": "ok",
             "router": {
@@ -96,21 +104,15 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.get("/v1/node-info")
     async def node_info() -> dict[str, Any]:
+        """Return metadata peers use for health and load balancing."""
         node = await monitor.current_local_node_info()
         return _node_info_payload(node)
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
-        """Aggregate model catalog across all healthy nodes in the cluster.
-
-        Returns the same schema as oMLX's ``/v1/models`` — a drop-in
-        replacement so clients see a unified model list.
-        """
-        import time
-
+        """Aggregate model IDs across healthy nodes in oMLX-compatible format."""
         now = int(time.time())
-        all_models = router.aggregate_models()
-
+        all_models = router.aggregate_models(healthy_only=True)
         data = [
             {
                 "id": model,
@@ -124,6 +126,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
+        """Route or locally proxy chat completion requests."""
         payload = await _read_json_body(request)
         if _is_local_only(request):
             return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/chat/completions", stream=bool(payload.get("stream")))
@@ -142,6 +145,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Response:
+        """Route or locally proxy embeddings requests."""
         payload = await _read_json_body(request)
         if _is_local_only(request):
             return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/embeddings", stream=False)
@@ -411,7 +415,8 @@ def _node_info_payload(node: NodeInfo) -> dict[str, Any]:
     }
 
 
-def install_launchagent(config_path: str | Path | None = None, *, load: bool = True) -> Path:
+def install_launchagent(config_path: str | Path | None = None, *, load: bool = True) -> Path:  # pragma: no cover - macOS launchctl integration
+    """Write a LaunchAgent plist for the router, optionally loading it."""
     config = load_config(config_path)
     resolved_config = resolve_config_path(config_path)
     repo_root = Path(__file__).resolve().parent.parent
@@ -453,7 +458,8 @@ def install_launchagent(config_path: str | Path | None = None, *, load: bool = T
     return plist_path
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:  # pragma: no cover - thin CLI wrapper
+    """Build the CLI parser for the router entrypoint."""
     parser = argparse.ArgumentParser(description="Run the oMLX PrivateNet router.")
     parser.add_argument("--config", default=str(resolve_config_path()), help="Path to router config JSON.")
     parser.add_argument("--host", default=None, help="Override bind host.")
@@ -467,7 +473,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def main(argv: Iterable[str] | None = None) -> int:  # pragma: no cover - thin CLI wrapper
+    """CLI entrypoint for launching the router service."""
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.install_launchagent:
@@ -483,5 +490,5 @@ def main(argv: Iterable[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
