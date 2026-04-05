@@ -41,6 +41,7 @@ EXISTING_OMLX="false"      # true when oMLX is already running and managed exter
 OPENCLAW_BIN=""             # path to openclaw CLI, empty if not found
 INSTALL_OPENCLAW="false"    # true when user opts in to plugin install
 INSTALL_MODE="${OMLX_PRIVATENET_MODE:-node}"  # "node" = full peer node, "client" = router-only (no oMLX)
+SKIP_MODELS="${OMLX_PRIVATENET_SKIP_MODELS:-0}"  # set to 1 or pass --no-models to skip model downloads
 STEP=0
 TOTAL_STEPS=0               # computed dynamically
 
@@ -329,7 +330,11 @@ compute_steps() {
     # Full node: always 8 base steps
     TOTAL_STEPS=8
     if [ "$EXISTING_OMLX" = "false" ]; then
-      TOTAL_STEPS=$((TOTAL_STEPS + 3))  # repos + venv + models
+      if [ "$SKIP_MODELS" = "1" ]; then
+        TOTAL_STEPS=$((TOTAL_STEPS + 2))  # repos + venv (no models)
+      else
+        TOTAL_STEPS=$((TOTAL_STEPS + 3))  # repos + venv + models
+      fi
     else
       TOTAL_STEPS=$((TOTAL_STEPS + 2))  # router repo + venv
     fi
@@ -1066,6 +1071,7 @@ main() {
   for arg in "$@"; do
     case "$arg" in
       --client) INSTALL_MODE="client" ;;
+      --no-models) SKIP_MODELS="1" ;;
     esac
   done
 
@@ -1160,7 +1166,7 @@ main() {
   ensure_venv
 
   # ── Models (full node fresh install only) ──────────────────────────────
-  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ] && [ "$SKIP_MODELS" != "1" ]; then
     step "Downloading AI models" "These are the actual AI brains — two versions of Google's Gemma 4."
     info "This is the longest step. Total download: ~33 GB."
     printf '\n'
