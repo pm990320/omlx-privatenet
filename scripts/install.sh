@@ -244,23 +244,14 @@ ask_openclaw_plugin() {
 }
 
 install_openclaw_plugin() {
-  # Check if already installed
-  local already_installed="false"
-  if "$OPENCLAW_BIN" plugins list 2>/dev/null | grep -q "omlx"; then
-    already_installed="true"
+  # Always install/update to get the latest version
+  info "Installing the latest openclaw-omlx plugin..."
+  if ! "$OPENCLAW_BIN" plugins install openclaw-omlx 2>&1; then
+    warn "Plugin install failed. You can install it manually later with:"
+    warn "  openclaw plugins install openclaw-omlx"
+    return
   fi
-
-  if [ "$already_installed" = "true" ]; then
-    info "openclaw-omlx plugin is already installed — updating configuration..."
-  else
-    info "Installing the openclaw-omlx plugin..."
-    if ! "$OPENCLAW_BIN" plugins install openclaw-omlx 2>&1; then
-      warn "Plugin install failed. You can install it manually later with:"
-      warn "  openclaw plugins install openclaw-omlx"
-      return
-    fi
-    success "openclaw-omlx plugin installed."
-  fi
+  success "openclaw-omlx plugin installed."
 
   # Configure the plugin to point at the router
   local router_url="http://${TAILSCALE_IP}:8741/v1"
