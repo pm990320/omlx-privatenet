@@ -669,29 +669,29 @@ ensure_venv() {
   printf '\n'
 
   info "Upgrading core Python tools..."
-  "$PIP_BIN" install --upgrade pip setuptools wheel >/dev/null 2>&1
+  "$PIP_BIN" install --upgrade pip setuptools wheel || die "Failed to upgrade pip/setuptools."
   success "Core tools ready."
 
   if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     info "Installing Hugging Face tools (for downloading AI models)..."
-    "$PIP_BIN" install --upgrade huggingface-hub >/dev/null 2>&1
+    "$PIP_BIN" install --upgrade huggingface-hub || die "Failed to install huggingface-hub. Check your internet connection and try again."
     success "Hugging Face tools installed."
 
     info "Installing oMLX (the local inference server)..."
-    "$PIP_BIN" install -e "$OMLX_SRC" >/dev/null 2>&1
+    "$PIP_BIN" install -e "$OMLX_SRC" || die "Failed to install oMLX."
     success "oMLX installed."
 
     info "Installing xgrammar (helps the AI follow structured output formats)..."
-    "$PIP_BIN" install --upgrade xgrammar >/dev/null 2>&1
+    "$PIP_BIN" install --upgrade xgrammar || die "Failed to install xgrammar."
     success "xgrammar installed."
 
     info "Installing our custom AI language model library (adds Gemma 4 support)..."
-    "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_FORK" >/dev/null 2>&1
+    "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_FORK" || die "Failed to install mlx-lm fork."
     success "Custom mlx-lm installed."
   fi
 
   info "Installing the PrivateNet router dependencies..."
-  "$PIP_BIN" install -r "$PRIVATENET_SRC/router/requirements.txt" >/dev/null 2>&1
+  "$PIP_BIN" install -r "$PRIVATENET_SRC/router/requirements.txt" || die "Failed to install router dependencies."
   success "Router dependencies installed."
 }
 
