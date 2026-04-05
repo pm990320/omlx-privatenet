@@ -663,7 +663,12 @@ ensure_venv() {
   fi
 
   PIP_BIN="$VENV_DIR/bin/pip"
-  HF_BIN="$VENV_DIR/bin/huggingface-cli"
+  # Prefer the standalone CLI binary, fall back to python -m
+  if [ -x "$VENV_DIR/bin/huggingface-cli" ]; then
+    HF_BIN="$VENV_DIR/bin/huggingface-cli"
+  else
+    HF_BIN="$VENV_DIR/bin/python -m huggingface_hub.cli"
+  fi
 
   info "Installing required software. This may take a few minutes depending on your internet speed."
   printf '\n'
@@ -698,7 +703,7 @@ ensure_venv() {
 # ── Models ───────────────────────────────────────────────────────────────────
 ensure_models() {
   mkdir -p "$MODEL_DIR"
-  [ -x "$HF_BIN" ] || die "Hugging Face CLI wasn't installed properly. Try re-running the installer."
+  $HF_BIN version >/dev/null 2>&1 || $HF_BIN --help >/dev/null 2>&1 || die "Hugging Face CLI wasn't installed properly. Try re-running the installer."
 
   download_model() {
     local model="$1"
