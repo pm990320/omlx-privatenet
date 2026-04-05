@@ -663,12 +663,6 @@ ensure_venv() {
   fi
 
   PIP_BIN="$VENV_DIR/bin/pip"
-  # Prefer the standalone CLI binary, fall back to python -m
-  if [ -x "$VENV_DIR/bin/huggingface-cli" ]; then
-    HF_BIN="$VENV_DIR/bin/huggingface-cli"
-  else
-    HF_BIN="$VENV_DIR/bin/python -m huggingface_hub.cli"
-  fi
 
   info "Installing required software. This may take a few minutes depending on your internet speed."
   printf '\n'
@@ -680,6 +674,12 @@ ensure_venv() {
   if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     info "Installing Hugging Face tools (for downloading AI models)..."
     "$PIP_BIN" install --upgrade huggingface-hub || die "Failed to install huggingface-hub. Check your internet connection and try again."
+    # Set HF_BIN after install — prefer standalone binary, fall back to python -m
+    if [ -x "$VENV_DIR/bin/huggingface-cli" ]; then
+      HF_BIN="$VENV_DIR/bin/huggingface-cli"
+    else
+      HF_BIN="$VENV_DIR/bin/python -m huggingface_hub"
+    fi
     success "Hugging Face tools installed."
 
     info "Installing oMLX (the local inference server)..."
@@ -703,7 +703,7 @@ ensure_venv() {
 # ── Models ───────────────────────────────────────────────────────────────────
 ensure_models() {
   mkdir -p "$MODEL_DIR"
-  $HF_BIN version >/dev/null 2>&1 || $HF_BIN --help >/dev/null 2>&1 || die "Hugging Face CLI wasn't installed properly. Try re-running the installer."
+  $HF_BIN env >/dev/null 2>&1 || die "Hugging Face CLI wasn't installed properly. Try: rm -rf ~/.omlx-privatenet/venv && re-run the installer."
 
   download_model() {
     local model="$1"
