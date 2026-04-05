@@ -40,6 +40,7 @@ OMLX_API_KEY=""
 EXISTING_OMLX="false"      # true when oMLX is already running and managed externally
 OPENCLAW_BIN=""             # path to openclaw CLI, empty if not found
 INSTALL_OPENCLAW="false"    # true when user opts in to plugin install
+INSTALL_MODE="${OMLX_PRIVATENET_MODE:-node}"  # "node" = full peer node, "client" = router-only (no oMLX)
 STEP=0
 TOTAL_STEPS=0               # computed dynamically
 
@@ -48,6 +49,7 @@ TOTAL_STEPS=0               # computed dynamically
 # Override specific choices with environment variables:
 #   OMLX_PRIVATENET_INSTALL_OPENCLAW=1   Install the OpenClaw plugin without asking
 #   OMLX_PRIVATENET_INSTALL_OPENCLAW=0   Skip the OpenClaw plugin without asking
+#   OMLX_PRIVATENET_ROUTER_URL=http://...  Router URL for client mode
 NONINTERACTIVE="${NONINTERACTIVE:-0}"
 
 # ── Colours (used inline via printf escape codes) ────────────────────────────
@@ -317,28 +319,20 @@ with open(config_path, "w") as f:
 }
 
 compute_steps() {
-  # Steps that always run:
-  #  1. Check Mac
-  #  2. Install developer tools
-  #  3. Install required software
-  #  4. Connect Tailscale
-  #  5. Advertise tag
-  #  6. Writing configuration
-  #  7. Installing automatic startup
-  #  8. Starting services
-  TOTAL_STEPS=8
-
-  if [ "$EXISTING_OMLX" = "false" ]; then
-    # Extra steps for fresh oMLX install:
-    #  +1 Download software (repos)
-    #  +1 Set up Python environment
-    #  +1 Download AI models
-    TOTAL_STEPS=$((TOTAL_STEPS + 3))
+  if [ "$INSTALL_MODE" = "client" ]; then
+    # Client mode steps:
+    #  1. Check Mac     2. Dev tools     3. Software
+    #  4. Tailscale     5. Download router  6. Python env
+    #  7. Config        8. Startup       9. Start services
+    TOTAL_STEPS=9
   else
-    # Still need to download the router code
-    #  +1 Download router code
-    #  +1 Set up Python environment (router deps only)
-    TOTAL_STEPS=$((TOTAL_STEPS + 2))
+    # Full node: always 8 base steps
+    TOTAL_STEPS=8
+    if [ "$EXISTING_OMLX" = "false" ]; then
+      TOTAL_STEPS=$((TOTAL_STEPS + 3))  # repos + venv + models
+    else
+      TOTAL_STEPS=$((TOTAL_STEPS + 2))  # router repo + venv
+    fi
   fi
 
   if [ "$INSTALL_OPENCLAW" = "true" ]; then
@@ -348,8 +342,43 @@ compute_steps() {
 
 # ── System checks ────────────────────────────────────────────────────────────
 require_supported_host() {
-  [ "$(uname -s)" = "Darwin" ] || die "This installer only works on macOS. Linux and Windows are not supported."
-  [ "$(uname -m)" = "arm64" ] || die "This requires an Apple Silicon Mac (M1, M2, M3, or M4 chip). Older Intel Macs can't run the AI models we need."
+  if [ "$INSTALL_MODE" = "client" ]; then
+    # Client mode: only need macOS (any arch) for Homebrew/Tailscale
+    [ "$(uname -s)" = "Darwin" ] || die "This installer only works on macOS. Linux and Windows are not supported yet."
+    success "macOS confirmed — installing in client mode (no local AI models)."
+    return
+  fi
+
+  if [ "$(uname -s)" != "Darwin" ]; then
+    die "This installer only works on macOS. Linux and Windows are not supported yet."
+  fi
+
+  if [ "$(uname -m)" != "arm64" ]; then
+    warn "This Mac doesn't have Apple Silicon (M1/M2/M3/M4)."
+    warn "It can't run AI models locally, but it CAN connect to PrivateNet"
+    warn "as a client and use models running on other Macs."
+    printf '\n'
+    if [ "$NONINTERACTIVE" = "1" ]; then
+      info "Switching to client mode (non-interactive)."
+      INSTALL_MODE="client"
+    else
+      printf '  \033[1mInstall as a client (no local models)? [Y/n]\033[0m '
+      local answer=""
+      prompt_read answer || true
+      case "$answer" in
+        [nN]|[nN][oO])
+          die "Cannot install as a full node without Apple Silicon."
+          ;;
+        *)
+          INSTALL_MODE="client"
+          ;;
+      esac
+    fi
+    success "Installing in client mode — this Mac will use models from other PrivateNet nodes."
+    return
+  fi
+
+  success "Apple Silicon Mac confirmed — you're good to go!"
 }
 
 # ── Homebrew ─────────────────────────────────────────────────────────────────
@@ -589,7 +618,7 @@ except Exception:
 ensure_repos() {
   mkdir -p "$INSTALL_ROOT"
 
-  if [ "$EXISTING_OMLX" = "false" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     if [ -d "$OMLX_SRC/.git" ]; then
       info "oMLX source already exists — updating to $OMLX_REF..."
       git -C "$OMLX_SRC" remote set-url origin "$OMLX_REPO"
@@ -643,7 +672,7 @@ ensure_venv() {
   "$PIP_BIN" install --upgrade pip setuptools wheel >/dev/null 2>&1
   success "Core tools ready."
 
-  if [ "$EXISTING_OMLX" = "false" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     info "Installing Hugging Face tools (for downloading AI models)..."
     "$PIP_BIN" install --upgrade huggingface-hub >/dev/null 2>&1
     success "Hugging Face tools installed."
@@ -797,11 +826,15 @@ build_local_models_list() {
 
 write_router_config() {
   local models_json
-  models_json="$(python3 -c '
+  if [ "$INSTALL_MODE" = "client" ]; then
+    models_json="[]"
+  else
+    models_json="$(python3 -c '
 import json, sys
 models = [line for line in sys.stdin.read().strip().split("\n") if line]
 print(json.dumps(models))
 ' <<< "$(build_local_models_list)")"
+  fi
 
   python3 -c '
 from pathlib import Path; import json, sys
@@ -947,7 +980,9 @@ load_launchagent() {
 print_summary() {
   printf '\n'
   printf '\033[1m\033[0;32m════════════════════════════════════════════════════════════\033[0m\n'
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  if [ "$INSTALL_MODE" = "client" ]; then
+    printf '\033[1m\033[0;32m  All done! This Mac is now a PrivateNet client.\033[0m\n'
+  elif [ "$EXISTING_OMLX" = "true" ]; then
     printf '\033[1m\033[0;32m  All done! The PrivateNet router is now running.\033[0m\n'
   else
     printf '\033[1m\033[0;32m  All done! This Mac now runs both oMLX and the router.\033[0m\n'
@@ -955,7 +990,12 @@ print_summary() {
   printf '\033[1m\033[0;32m════════════════════════════════════════════════════════════\033[0m\n'
   printf '\n'
   printf '  \033[1mWhat just happened:\033[0m\n'
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  if [ "$INSTALL_MODE" = "client" ]; then
+    printf '  - The PrivateNet router is running on 0.0.0.0:8741\n'
+    printf '  - The router will start automatically after reboots\n'
+    printf '  - This Mac has no local models — it uses models from peer nodes\n'
+    printf '  - Requests are forwarded to PrivateNet nodes via Tailscale\n'
+  elif [ "$EXISTING_OMLX" = "true" ]; then
     printf '  - Found your existing oMLX on 127.0.0.1:5741 (untouched)\n'
     printf '  - The PrivateNet router is running on 0.0.0.0:8741\n'
     printf '  - The router will start automatically after reboots\n'
@@ -964,19 +1004,26 @@ print_summary() {
     printf '  - The router is running on 0.0.0.0:8741\n'
     printf '  - Both services will start automatically after reboots\n'
   fi
-  printf '  - This Mac will discover peer nodes automatically through Tailscale\n'
+  if [ "$INSTALL_MODE" != "client" ]; then
+    printf '  - This Mac will discover peer nodes automatically through Tailscale\n'
+  fi
   printf '\n'
   printf '  \033[1mThis node:\033[0m\n'
   printf '  - Node ID:       %s\n' "$NODE_ID"
   printf '  - Tailscale IP:  %s\n' "$TAILSCALE_IP"
   printf '  - Router URL:    http://%s:8741/v1\n' "$TAILSCALE_IP"
   printf '  - Router config: %s\n' "$ROUTER_CONFIG"
+  if [ "$INSTALL_MODE" = "client" ]; then
+    printf '  - Mode:          client (no local models)\n'
+  fi
   printf '\n'
-  printf '  \033[1mModels available:\033[0m\n'
-  build_local_models_list | while IFS= read -r m; do
-    printf '  - %s\n' "$m"
-  done
-  printf '\n'
+  if [ "$INSTALL_MODE" != "client" ]; then
+    printf '  \033[1mModels available:\033[0m\n'
+    build_local_models_list | while IFS= read -r m; do
+      printf '  - %s\n' "$m"
+    done
+    printf '\n'
+  fi
   if [ "$TAILSCALE_TAG_STATUS" = "needs-admin" ]; then
     printf '  \033[1m\033[0;33mAction still needed:\033[0m Ask your Tailscale admin to allow the tag\n'
     printf '  \033[0;33m  %s\033[0m in the tailnet ACL policy, then run:\n' "$TAILSCALE_TAG"
@@ -1010,6 +1057,13 @@ print_summary() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
+  # Parse --client flag
+  for arg in "$@"; do
+    case "$arg" in
+      --client) INSTALL_MODE="client" ;;
+    esac
+  done
+
   printf '\n'
   printf '\033[1m\033[0;36m╔════════════════════════════════════════════════════════════╗\033[0m\n'
   printf '\033[1m\033[0;36m║         oMLX PrivateNet — Peer Node Installer              ║\033[0m\n'
@@ -1017,36 +1071,26 @@ main() {
   printf '\n'
 
   # Early detection — changes messaging and step count
-  detect_existing_omlx
+  if [ "$INSTALL_MODE" != "client" ]; then
+    detect_existing_omlx
+  fi
 
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  if [ "$INSTALL_MODE" = "client" ]; then
+    printf '  This will set up your Mac as a PrivateNet \033[1mclient\033[0m.\n'
+    printf '  It will run a local router that forwards requests to PrivateNet\n'
+    printf '  nodes (other Macs with Apple Silicon that run the AI models).\n'
+    printf '\n'
+    printf '  No AI models will be downloaded — this Mac uses the cluster.\n'
+  elif [ "$EXISTING_OMLX" = "true" ]; then
     printf '  \033[0;32mFound an existing oMLX installation on this Mac.\033[0m\n'
     printf '  The installer will add the PrivateNet router alongside it\n'
     printf '  without changing your oMLX configuration or services.\n'
-    printf '\n'
-    printf '  The installer will:\n'
-    printf '  1. Check that your Mac is compatible (Apple Silicon required)\n'
-    printf '  2. Ensure developer tools are installed (Homebrew, Python, Git)\n'
-    printf '  3. Set up Tailscale and try to advertise %s\n' "$TAILSCALE_TAG"
-    printf '  4. Download the PrivateNet router code\n'
-    printf '  5. Install router dependencies in an isolated Python environment\n'
-    printf '  6. Configure the router to work with your existing oMLX\n'
-    printf '  7. Start the router as a background service\n'
   else
     printf '  This script will turn your Mac into a full PrivateNet peer.\n'
     printf '  Every peer runs two things:\n'
     printf '\n'
     printf '  - oMLX on 127.0.0.1:5741  (local inference server)\n'
     printf '  - Router on 0.0.0.0:8741 (OpenAI-compatible API + peer discovery)\n'
-    printf '\n'
-    printf '  The installer will:\n'
-    printf '  1. Check that your Mac is compatible (Apple Silicon required)\n'
-    printf '  2. Install developer tools (Homebrew, Python, Git)\n'
-    printf '  3. Set up Tailscale and try to advertise %s\n' "$TAILSCALE_TAG"
-    printf '  4. Download oMLX and the PrivateNet router code\n'
-    printf '  5. Install Python libraries for both services\n'
-    printf '  6. Download two AI models (~33 GB total — this takes a while!)\n'
-    printf '  7. Configure everything and start both background services\n'
   fi
   printf '\n'
   printf '  \033[2mSafe to re-run — it will skip anything already installed.\033[0m\n'
@@ -1059,36 +1103,43 @@ main() {
   compute_steps
 
   # ── Step 1: Check Mac ──────────────────────────────────────────────────
-  step "Checking your Mac" "Making sure this is an Apple Silicon Mac (M1/M2/M3/M4)..."
+  step "Checking your Mac"
   require_supported_host
-  success "Apple Silicon Mac confirmed — you're good to go!"
+  # require_supported_host may switch INSTALL_MODE to "client" — recompute
+  compute_steps
 
   # ── Step 2: Developer tools ────────────────────────────────────────────
   step "Installing developer tools" "These are standard Mac tools used by millions of developers."
   ensure_homebrew
 
   # ── Step 3: Required software ──────────────────────────────────────────
-  step "Installing required software" "Python (runs the AI), Git (downloads code), Tailscale (private network)."
+  if [ "$INSTALL_MODE" = "client" ]; then
+    step "Installing required software" "Python (for the router), Git (downloads code), Tailscale (private network)."
+  else
+    step "Installing required software" "Python (runs the AI), Git (downloads code), Tailscale (private network)."
+  fi
   ensure_dependencies
 
   # ── Step 4: Tailscale ──────────────────────────────────────────────────
   step "Connecting to Tailscale" "Tailscale creates a secure private network between all the Macs."
   ensure_tailscale_ip
 
-  # ── Step 5: Tag ────────────────────────────────────────────────────────
-  step "Advertising the PrivateNet tag" "Peers find each other automatically by the Tailscale tag $TAILSCALE_TAG."
-  ensure_tailscale_tag
+  # ── Step 5: Tag (nodes only — clients don't need to be discovered) ────
+  if [ "$INSTALL_MODE" != "client" ]; then
+    step "Advertising the PrivateNet tag" "Peers find each other automatically by the Tailscale tag $TAILSCALE_TAG."
+    ensure_tailscale_tag
+  fi
 
   # ── Existing oMLX: read its API key now ────────────────────────────────
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "true" ]; then
     read_existing_api_key
     if [ -z "$OMLX_API_KEY" ]; then
       die "Found oMLX settings.json but couldn't read the API key from it. Check $OMLX_BASE/settings.json"
     fi
   fi
 
-  # ── Steps 6+: Source code ──────────────────────────────────────────────
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  # ── Source code ─────────────────────────────────────────────────────────
+  if [ "$INSTALL_MODE" = "client" ] || [ "$EXISTING_OMLX" = "true" ]; then
     step "Downloading the router" "Fetching the PrivateNet router code."
   else
     step "Downloading the software" "Fetching both oMLX and the PrivateNet router code."
@@ -1096,15 +1147,15 @@ main() {
   ensure_repos
 
   # ── Python environment ─────────────────────────────────────────────────
-  if [ "$EXISTING_OMLX" = "true" ]; then
+  if [ "$INSTALL_MODE" = "client" ] || [ "$EXISTING_OMLX" = "true" ]; then
     step "Setting up the Python environment" "Installing the router dependencies in an isolated environment."
   else
     step "Setting up the Python environment" "Installing the libraries needed for both oMLX and the router."
   fi
   ensure_venv
 
-  # ── Models (fresh install only) ────────────────────────────────────────
-  if [ "$EXISTING_OMLX" = "false" ]; then
+  # ── Models (full node fresh install only) ──────────────────────────────
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     step "Downloading AI models" "These are the actual AI brains — two versions of Google's Gemma 4."
     info "This is the longest step. Total download: ~33 GB."
     printf '\n'
@@ -1113,14 +1164,16 @@ main() {
 
   # ── Configuration ──────────────────────────────────────────────────────
   step "Writing configuration" "Creating the local config files for the router."
-  ensure_api_key
   ensure_node_id
-  write_node_env
-  success "Environment config written."
-  if [ "$EXISTING_OMLX" = "false" ]; then
-    write_settings_json
-  else
-    success "oMLX settings.json already exists — not overwriting."
+  if [ "$INSTALL_MODE" != "client" ]; then
+    ensure_api_key
+    write_node_env
+    success "Environment config written."
+    if [ "$EXISTING_OMLX" = "false" ]; then
+      write_settings_json
+    else
+      success "oMLX settings.json already exists — not overwriting."
+    fi
   fi
   write_router_config
   success "Router config written."
@@ -1130,10 +1183,10 @@ main() {
   # ── LaunchAgents ───────────────────────────────────────────────────────
   step "Installing automatic startup" "Setting up the router to start automatically."
 
-  if [ "$EXISTING_OMLX" = "false" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     write_launchagent "$OMLX_AGENT" "$OMLX_START_SCRIPT" "$OMLX_LABEL" "omlx.stdout.log" "omlx.stderr.log"
     success "oMLX LaunchAgent written."
-  else
+  elif [ "$INSTALL_MODE" != "client" ]; then
     success "oMLX is already managed by an existing LaunchAgent — skipping."
   fi
   write_launchagent "$ROUTER_AGENT" "$ROUTER_START_SCRIPT" "$ROUTER_LABEL" "router.stdout.log" "router.stderr.log"
@@ -1142,10 +1195,10 @@ main() {
   # ── Start services ─────────────────────────────────────────────────────
   step "Starting services" "Bringing up the router."
 
-  if [ "$EXISTING_OMLX" = "false" ]; then
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ]; then
     load_launchagent "$OMLX_AGENT" "$OMLX_LABEL"
     success "oMLX is running."
-  else
+  elif [ "$INSTALL_MODE" != "client" ]; then
     success "oMLX is already running (managed externally)."
   fi
   load_launchagent "$ROUTER_AGENT" "$ROUTER_LABEL"
