@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ── Configurable defaults ────────────────────────────────────────────────────
 OMLX_REPO="https://github.com/pm990320/omlx.git"
-OMLX_REF="v0.3.2"
+OMLX_REF="v0.3.1"
 PRIVATENET_REPO="https://github.com/pm990320/omlx-privatenet.git"
 PRIVATENET_REF="main"
 MLX_LM_FORK="git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
