@@ -901,10 +901,13 @@ write_start_scripts() {
     write_text_file "$OMLX_START_SCRIPT" 0700 "$omlx_content"
   fi
 
+  # shellcheck disable=SC2016
+  local path_export='export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Tailscale.app/Contents/MacOS:$PATH"'
   local router_content
   router_content="$(printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
+    "$path_export" \
     "source \"$VENV_DIR/bin/activate\"" \
     "cd \"$PRIVATENET_SRC\"" \
     "exec python -m router.server --config \"$ROUTER_CONFIG\" --host \"0.0.0.0\" --port \"8741\"" \
