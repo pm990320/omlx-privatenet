@@ -38,6 +38,11 @@ class RouterConfig:
     local_models: list[str] = field(default_factory=lambda: list(DEFAULT_LOCAL_MODELS))
     local_max_concurrent: int = 8
     advertise_models: list[str] | None = None  # None = all models, list = only these
+    auto_download: bool = False
+    auto_download_max_gb: int | None = None
+    trusted_orgs: list[str] = field(default_factory=lambda: ["mlx-community"])
+    auto_update: bool = False
+    update_interval_hours: int = 6
     source_path: Path | None = None
 
     @classmethod
@@ -71,8 +76,32 @@ class RouterConfig:
             local_models=[str(model) for model in local_models],
             local_max_concurrent=max(1, int(data.get("local_max_concurrent", 8))),
             advertise_models=([str(m) for m in data["advertise_models"]] if isinstance(data.get("advertise_models"), list) else None),
+            auto_download=_to_bool(data.get("auto_download", False)),
+            auto_download_max_gb=(_to_optional_int(data.get("auto_download_max_gb"))),
+            trusted_orgs=([str(o) for o in data["trusted_orgs"]] if isinstance(data.get("trusted_orgs"), list) else ["mlx-community"]),
+            auto_update=_to_bool(data.get("auto_update", False)),
+            update_interval_hours=max(1, int(data.get("update_interval_hours", 6))),
             source_path=source_path,
         )
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"true", "1", "yes"}
+    return bool(value)
+
+
+def _to_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lower() in {"", "none", "null"}:
+            return None
+        return int(value)
+    return int(value)
 
 
 def _read_json(path: Path) -> Any:
@@ -102,17 +131,24 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         f"{ENV_PREFIX}LOCAL_OMLX_API_KEY": "local_omlx_api_key",
         f"{ENV_PREFIX}LOCAL_MODELS": "local_models",
         f"{ENV_PREFIX}LOCAL_MAX_CONCURRENT": "local_max_concurrent",
+        f"{ENV_PREFIX}AUTO_DOWNLOAD": "auto_download",
+        f"{ENV_PREFIX}AUTO_DOWNLOAD_MAX_GB": "auto_download_max_gb",
+        f"{ENV_PREFIX}TRUSTED_ORGS": "trusted_orgs",
+        f"{ENV_PREFIX}AUTO_UPDATE": "auto_update",
+        f"{ENV_PREFIX}UPDATE_INTERVAL_HOURS": "update_interval_hours",
     }
 
     for env_name, field_name in env_to_field.items():
         raw_value = os.getenv(env_name)
         if raw_value is None:
             continue
-        if field_name == "local_models":
+        if field_name in ("local_models", "trusted_orgs"):
             overrides[field_name] = [item.strip() for item in raw_value.split(",") if item.strip()]
-        elif field_name == "overload_threshold":
+        elif field_name in ("overload_threshold", "auto_download_max_gb"):
             value = raw_value.strip()
             overrides[field_name] = None if value.lower() in {"", "none", "null"} else int(value)
+        elif field_name in ("auto_download", "auto_update"):
+            overrides[field_name] = raw_value.lower() in {"true", "1", "yes"}
         else:
             overrides[field_name] = raw_value
 

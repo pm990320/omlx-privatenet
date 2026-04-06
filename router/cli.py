@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 def _state_dir() -> Path:
@@ -198,6 +199,142 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def _registry_path() -> Path:
+    return _state_dir() / "registry.json"
+
+
+def cmd_registry(args: argparse.Namespace) -> int:
+    """Manage the shared model registry."""
+    from router.registry import Registry, RegistryModel
+
+    registry = Registry(path=_registry_path())
+    registry.load()
+
+    action = args.registry_action
+
+    if action == "list":
+        models = registry.models
+        if not models:
+            print(f"\n  {DIM}No models in the registry.{RESET}\n")
+            return 0
+        print(f"\n  {BOLD}Registry Models{RESET}")
+        print(f"  {'─' * 60}")
+        print(f"  {'ID':<30} {'REPO':<30} {'PRI':>3}  {'ADDED BY'}")
+        print(f"  {'─' * 60}")
+        for m in sorted(models, key=lambda x: x.priority, reverse=True):
+            print(f"  {m.id:<30} {m.repo:<30} {m.priority:>3}  {m.added_by}")
+        print()
+        return 0
+
+    if action == "add":
+        repo = args.repo
+        parts = repo.split("/", 1)
+        if len(parts) != 2 or not parts[1]:
+            print(f"\n  {RED}Invalid repo format. Expected: org/model-name{RESET}\n")
+            return 1
+        model_id = parts[1]
+        node_id = _load_node_id()
+        model = RegistryModel(
+            repo=repo,
+            id=model_id,
+            priority=args.priority,
+            added_by=node_id,
+            added_at=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            registry.add(model)
+        except ValueError as exc:
+            print(f"\n  {RED}{exc}{RESET}\n")
+            return 1
+        registry.save()
+        print(f"\n  {GREEN}Added {model_id} (from {repo}) to the registry.{RESET}\n")
+        return 0
+
+    if action == "remove":
+        model_id = args.repo  # positional arg reused as model_id
+        if registry.remove(model_id):
+            registry.save()
+            print(f"\n  {GREEN}Removed {model_id} from the registry.{RESET}\n")
+            return 0
+        else:
+            print(f"\n  {YELLOW}Model {model_id} not found in the registry.{RESET}\n")
+            return 1
+
+    # No action — show help-like output
+    print(f"\n  {BOLD}Usage:{RESET}")
+    print(f"    privatenet registry list")
+    print(f"    privatenet registry add <org/model-name> [--priority N]")
+    print(f"    privatenet registry remove <model-id>\n")
+    return 1
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Get or set config values in router.json."""
+    action = args.config_action
+
+    if action == "get":
+        config = _load_router_config()
+        key = args.key
+        if key in config:
+            print(config[key])
+        else:
+            print(f"\n  {YELLOW}Key '{key}' not found in router.json.{RESET}\n")
+            return 1
+        return 0
+
+    if action == "set":
+        config = _load_router_config()
+        key = args.key
+        value = args.value
+        # Try to parse as JSON for non-string types
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            parsed = value
+        config[key] = parsed
+        _save_router_config(config)
+        print(f"\n  {GREEN}Set {key} = {json.dumps(parsed)}{RESET}\n")
+        return 0
+
+    print(f"\n  {BOLD}Usage:{RESET}")
+    print(f"    privatenet config get <key>")
+    print(f"    privatenet config set <key> <value>\n")
+    return 1
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Check for or apply updates."""
+    from router.updater import check_for_update, run_update
+
+    info = check_for_update()
+
+    if args.check:
+        print(f"\n  {BOLD}Update Check{RESET}")
+        print(f"  {'─' * 40}")
+        print(f"  Local version:   {info.local_version} ({info.local_sha})")
+        print(f"  Remote version:  {info.remote_version} ({info.remote_sha})")
+        if info.available:
+            print(f"  Status:          {YELLOW}update available{RESET}")
+        else:
+            print(f"  Status:          {GREEN}up to date{RESET}")
+        print()
+        return 0
+
+    if not info.available:
+        print(f"\n  {GREEN}Already up to date ({info.local_version}).{RESET}\n")
+        return 0
+
+    print(f"\n  Updating {info.local_version} -> {info.remote_version} ...")
+    result = run_update()
+    if result.success:
+        print(f"  {GREEN}Updated successfully.{RESET}")
+        print(f"  {DIM}{result.previous_sha} -> {result.new_sha}{RESET}\n")
+        return 0
+    else:
+        print(f"  {RED}Update failed: {result.error}{RESET}\n")
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="privatenet",
@@ -213,6 +350,22 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("models_action", nargs="?", choices=["set", "reset"], default=None)
     models_parser.add_argument("model_names", nargs="*", default=[])
 
+    # registry subcommand
+    registry_parser = sub.add_parser("registry", help="Manage the shared model registry")
+    registry_parser.add_argument("registry_action", nargs="?", choices=["list", "add", "remove"], default=None)
+    registry_parser.add_argument("repo", nargs="?", default=None, help="Repo (for add) or model ID (for remove)")
+    registry_parser.add_argument("--priority", type=int, default=5, help="Model priority (default: 5)")
+
+    # config subcommand
+    config_parser = sub.add_parser("config", help="Get or set router configuration")
+    config_parser.add_argument("config_action", nargs="?", choices=["get", "set"], default=None)
+    config_parser.add_argument("key", nargs="?", default=None, help="Config key")
+    config_parser.add_argument("value", nargs="?", default=None, help="Config value (for set)")
+
+    # update subcommand
+    update_parser = sub.add_parser("update", help="Check for or apply updates")
+    update_parser.add_argument("--check", action="store_true", help="Only check for updates, don't apply")
+
     return parser
 
 
@@ -225,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
         "disable": cmd_disable,
         "enable": cmd_enable,
         "models": cmd_models,
+        "registry": cmd_registry,
+        "config": cmd_config,
+        "update": cmd_update,
     }
 
     handler = commands.get(args.command)
