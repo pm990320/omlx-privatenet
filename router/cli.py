@@ -71,6 +71,13 @@ def cmd_status(_args: argparse.Namespace) -> int:
     else:
         print(f"  Status:    {GREEN}enabled{RESET}")
 
+    config = _load_router_config()
+    advertise = config.get("advertise_models")
+    if advertise is not None:
+        print(f"  Models:    {YELLOW}filtered ({len(advertise)}){RESET} — {', '.join(advertise)}")
+    else:
+        print(f"  Models:    all (default)")
+
     health = _check_router_health()
     if health is None:
         print(f"  Router:    {RED}not responding{RESET}")
@@ -80,8 +87,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         models = health.get("models", [])
         color = GREEN if router_status == "ok" else YELLOW
         print(f"  Router:    {color}{router_status}{RESET}")
-        print(f"  Models:    {len(models)}")
-        print(f"  Cluster:   {len(cluster)} node(s)")
+        print(f"  Cluster:   {len(cluster)} node(s), {len(models)} model(s)")
 
     print()
     return 0
