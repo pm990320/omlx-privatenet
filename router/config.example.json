@@ -15,9 +15,5 @@
   "local_tailscale_ip": "100.64.0.10",
   "local_omlx_url": "http://127.0.0.1:5741",
   "local_omlx_api_key": "pn-local-omlx-key",
-  "local_models": [
-    "gemma-4-26b-a4b-it-4bit",
-    "gemma-4-31b-it-4bit"
-  ],
   "local_max_concurrent": 8
 }

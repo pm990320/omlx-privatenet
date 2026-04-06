@@ -13,7 +13,7 @@ def test_default_config_values(tmp_path: Path):
     assert config.host == "0.0.0.0"
     assert config.port == 8741
     assert config.failure_threshold == 3
-    assert config.local_models
+    assert config.local_models == []
     assert config.source_path == missing.resolve()
 
 

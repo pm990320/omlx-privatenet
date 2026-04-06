@@ -10,10 +10,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path.home() / ".omlx-privatenet" / "router.json"
-DEFAULT_LOCAL_MODELS = (
-    "gemma-4-26b-a4b-it-4bit",
-    "gemma-4-31b-it-4bit",
-)
+DEFAULT_LOCAL_MODELS: tuple[str, ...] = ()
 ENV_PREFIX = "OMLX_PRIVATENET_ROUTER_"
 
 
@@ -45,9 +42,11 @@ class RouterConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, source_path: Path | None = None) -> "RouterConfig":
         """Build a config object from decoded JSON-like data."""
-        local_models = data.get("local_models") or list(DEFAULT_LOCAL_MODELS)
-        if not isinstance(local_models, list) or not local_models:
-            raise ValueError("`local_models` must be a non-empty JSON array.")
+        local_models = data.get("local_models")
+        if local_models is None:
+            local_models = list(DEFAULT_LOCAL_MODELS)
+        if not isinstance(local_models, list):
+            raise ValueError("`local_models` must be a JSON array.")
 
         overload_threshold = data.get("overload_threshold")
         return cls(

@@ -814,43 +814,12 @@ path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
   success "oMLX settings written."
 }
 
-build_local_models_list() {
-  # Build the models list for router config.
-  # Prefer what's actually available on disk.
-  local found_models=()
-  if [ -d "$MODEL_DIR" ]; then
-    for d in "$MODEL_DIR"/*/; do
-      if [ -f "$d/config.json" ]; then
-        found_models+=("$(basename "$d")")
-      fi
-    done
-  fi
-
-  if [ ${#found_models[@]} -gt 0 ]; then
-    printf '%s\n' "${found_models[@]}"
-  else
-    # Fallback to defaults
-    printf '%s\n%s\n' "$MODEL_1" "$MODEL_2"
-  fi
-}
 
 write_router_config() {
-  local models_json
-  if [ "$INSTALL_MODE" = "client" ]; then
-    models_json="[]"
-  else
-    models_json="$(python3 -c '
-import json, sys
-models = [line for line in sys.stdin.read().strip().split("\n") if line]
-print(json.dumps(models))
-' <<< "$(build_local_models_list)")"
-  fi
-
   python3 -c '
 from pathlib import Path; import json, sys
 path = Path(sys.argv[1]).expanduser()
 path.parent.mkdir(parents=True, exist_ok=True)
-models = json.loads(sys.argv[7])
 payload = {
   "host": "0.0.0.0",
   "port": 8741,
@@ -868,7 +837,6 @@ payload = {
   "local_tailscale_ip": sys.argv[4],
   "local_omlx_url": "http://127.0.0.1:5741",
   "local_omlx_api_key": sys.argv[5],
-  "local_models": models,
   "local_max_concurrent": 8
 }
 # If config already exists, preserve user edits to fields we do not need to change
@@ -879,13 +847,15 @@ if path.exists():
     except Exception:
         pass
 # Always update these discovery-critical fields
-for key in ("local_node_id", "local_tailscale_ip", "local_omlx_api_key", "local_models"):
+for key in ("local_node_id", "local_tailscale_ip", "local_omlx_api_key"):
     existing[key] = payload[key]
+# Remove stale local_models if present (models are now discovered dynamically)
+existing.pop("local_models", None)
 # Set defaults for any missing keys
 for key, val in payload.items():
     existing.setdefault(key, val)
 path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-' "$ROUTER_CONFIG" "$TAILSCALE_TAG" "$NODE_ID" "$TAILSCALE_IP" "$OMLX_API_KEY" "unused" "$models_json"
+' "$ROUTER_CONFIG" "$TAILSCALE_TAG" "$NODE_ID" "$TAILSCALE_IP" "$OMLX_API_KEY"
 }
 
 write_start_scripts() {
@@ -1030,13 +1000,8 @@ print_summary() {
     printf '  - Mode:          client (no local models)\n'
   fi
   printf '\n'
-  if [ "$INSTALL_MODE" != "client" ]; then
-    printf '  \033[1mModels available:\033[0m\n'
-    build_local_models_list | while IFS= read -r m; do
-      printf '  - %s\n' "$m"
-    done
-    printf '\n'
-  fi
+  printf '  \033[2mModels are discovered automatically from oMLX and peer nodes.\033[0m\n'
+  printf '\n'
   if [ "$TAILSCALE_TAG_STATUS" = "needs-admin" ]; then
     printf '  \033[1m\033[0;33mAction still needed:\033[0m Ask your Tailscale admin to allow the tag\n'
     printf '  \033[0;33m  %s\033[0m in the tailnet ACL policy, then run:\n' "$TAILSCALE_TAG"
