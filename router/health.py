@@ -13,6 +13,7 @@ import httpx
 
 from .config import RouterConfig
 from .discovery import DiscoveredPeer, TailscaleDiscovery
+from .registry import Registry, RegistryModel
 from .router import ConsistentHashRouter, NodeInfo
 
 
@@ -29,6 +30,8 @@ class NodeHealthMonitor:
         self._known_peers: dict[str, DiscoveredPeer] = {}
         self._last_nodes: dict[str, NodeInfo] = {}
         self._failures: dict[str, int] = {}
+        state_dir = Path(os.environ.get("OMLX_PRIVATENET_STATE_DIR", str(Path.home() / ".omlx-privatenet")))
+        self.registry = Registry(path=state_dir / "registry.json")
 
     async def run_forever(self) -> None:
         """Continuously refresh discovery and health state."""
@@ -54,6 +57,26 @@ class NodeHealthMonitor:
         nodes = [node for node in await asyncio.gather(*tasks) if node is not None]
         self._last_nodes = {node.node_id: node for node in nodes}
         self.router.update_nodes(nodes)
+
+        # Best-effort: fetch and merge registries from healthy remote peers
+        self.registry.load()
+        for node in nodes:
+            if node.local or not node.healthy:
+                continue
+            try:
+                resp = await self.client.get(
+                    f"{node.router_url}/v1/registry",
+                    timeout=self.config.health_check_timeout_seconds,
+                )
+                resp.raise_for_status()
+                remote_data = resp.json()
+                remote_registry = Registry(path=self.registry.path)
+                for entry in remote_data.get("models", []):
+                    remote_registry.add(RegistryModel.from_dict(entry))
+                self.registry.merge(remote_registry)
+            except Exception:  # noqa: BLE001
+                pass  # best-effort — skip on failure
+        self.registry.save()
 
     async def current_local_node_info(self) -> NodeInfo:
         """Return a freshly probed view of the local node."""

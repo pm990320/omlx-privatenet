@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from router.config import load_config
 from router.health import NodeHealthMonitor
+from router.registry import Registry, RegistryModel
 from router.router import ConsistentHashRouter
 
 
@@ -275,4 +278,70 @@ async def test_enabled_node_reports_healthy(write_config, make_peer, tmp_path, m
     local = router.get_node(config.local_node_id)
     assert local is not None
     assert local.healthy is True
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_registry_merge_from_remote_peer(write_config, make_peer, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+
+    config = load_config(write_config())
+    router = ConsistentHashRouter(local_node_id=config.local_node_id)
+
+    # Seed local registry with one model
+    local_registry = Registry(path=tmp_path / "registry.json")
+    local_registry.add(RegistryModel(repo="mlx-community/local-model", id="local-model"))
+    local_registry.save()
+
+    remote_registry_payload = {
+        "models": [
+            {
+                "repo": "mlx-community/remote-model",
+                "id": "remote-model",
+                "priority": 5,
+                "added_by": "peer",
+                "added_at": "2026-01-01T00:00:00+00:00",
+                "safetensors_only": True,
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == "http://127.0.0.1:5741/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        if url == "http://127.0.0.1:5741/v1/models":
+            return httpx.Response(200, json={
+                "object": "list",
+                "data": [{"id": LOCAL_MODEL, "object": "model"}],
+            })
+        if url == "http://100.64.0.2:8741/v1/node-info":
+            return httpx.Response(200, json={
+                "node_id": "remote-node",
+                "tailscale_ip": "100.64.0.2",
+                "models": [REMOTE_MODEL],
+                "in_flight": 0,
+                "max_concurrent": 4,
+                "healthy": True,
+                "uptime_seconds": 90,
+            })
+        if url == "http://100.64.0.2:8741/v1/registry":
+            return httpx.Response(200, json=remote_registry_payload)
+        raise AssertionError(f"Unexpected request: {url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monitor = NodeHealthMonitor(config, router, client)
+    monitor.discovery.discover = lambda: [
+        make_peer(config.local_node_id, tailscale_ip="100.64.0.1", local=True),
+        make_peer("remote-node", tailscale_ip="100.64.0.2"),
+    ]
+
+    await monitor.run_once()
+
+    # Reload registry from disk and verify merge happened
+    result = Registry(path=tmp_path / "registry.json")
+    result.load()
+    model_ids = {m.id for m in result.models}
+    assert "local-model" in model_ids
+    assert "remote-model" in model_ids
     await client.aclose()

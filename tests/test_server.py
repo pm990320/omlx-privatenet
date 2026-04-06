@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
+from router.registry import Registry, RegistryModel
 from router.router import ConsistentHashRouter
 
 
@@ -293,3 +296,36 @@ async def test_node_info_reports_disabled_when_node_disabled(app_factory, make_n
     payload = response.json()
     assert payload["healthy"] is False
     assert payload["disabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_registry_returns_local_models(app_factory, make_node, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+    registry = Registry(path=tmp_path / "registry.json")
+    registry.add(RegistryModel(repo="mlx-community/gemma-4", id="gemma-4-26b"))
+    registry.save()
+
+    nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL])]
+
+    async with app_factory(nodes=nodes) as (_, client):
+        response = await client.get("/v1/registry")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["models"]) == 1
+    assert payload["models"][0]["id"] == "gemma-4-26b"
+    assert payload["models"][0]["repo"] == "mlx-community/gemma-4"
+
+
+@pytest.mark.asyncio
+async def test_registry_endpoint_is_unauthenticated(app_factory, make_node, tmp_path, monkeypatch):
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+
+    nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL])]
+
+    async with app_factory(nodes=nodes, config_overrides={"api_key": "router-key"}) as (_, client):
+        # No Authorization header — should still succeed
+        response = await client.get("/v1/registry")
+
+    assert response.status_code == 200
+    assert "models" in response.json()

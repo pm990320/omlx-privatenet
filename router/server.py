@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import RouterConfig, load_config, resolve_config_path
 from .health import NodeHealthMonitor
+from .registry import Registry
 from .router import ConsistentHashRouter, NodeInfo, RouteDecision
 
 HOP_BY_HOP_HEADERS = {
@@ -81,7 +82,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def enforce_auth(request: Request, call_next):  # type: ignore[override]
-        if request.url.path in {"/health", "/v1/node-info"}:
+        if request.url.path in {"/health", "/v1/node-info", "/v1/registry"}:
             return await call_next(request)
         try:
             _require_router_api_key(request, config)
@@ -113,6 +114,14 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             payload["healthy"] = False
             payload["disabled"] = True
         return payload
+
+    @app.get("/v1/registry")
+    async def get_registry() -> dict[str, Any]:
+        """Return the local model registry as JSON."""
+        state_dir = Path(os.environ.get("OMLX_PRIVATENET_STATE_DIR", Path.home() / ".omlx-privatenet"))
+        registry = Registry(path=state_dir / "registry.json")
+        registry.load()
+        return {"models": [m.to_dict() for m in registry.models]}
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
