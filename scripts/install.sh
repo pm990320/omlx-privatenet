@@ -840,7 +840,9 @@ payload = {
   "local_tailscale_ip": sys.argv[4],
   "local_omlx_url": "http://127.0.0.1:5741",
   "local_omlx_api_key": sys.argv[5],
-  "local_max_concurrent": 8
+  "local_max_concurrent": 8,
+  "auto_update": True,
+  "update_interval_hours": 6
 }
 # If config already exists, preserve user edits to fields we do not need to change
 existing = {}
