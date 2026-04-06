@@ -177,10 +177,13 @@ class ConsistentHashRouter:
         else:
             raise LookupError(f"No healthy nodes are currently available for model `{model}`.")
 
+        # Only include healthy candidates in the failover list so the proxy
+        # never attempts to send requests to disabled/unhealthy nodes.
+        failover_candidates = [node for node in ordered if node.healthy]
         return RouteDecision(
             selected=selected,
             primary=primary,
-            ordered_candidates=ordered,
+            ordered_candidates=failover_candidates or ordered,
             routing_key=routing_key,
             affinity_kind=affinity_kind,
             session_id=session_id,

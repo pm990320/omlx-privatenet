@@ -12,6 +12,12 @@ LOCAL_MODEL = "gemma-4-26b-a4b-it-4bit"
 REMOTE_MODEL = "text-embedding-3-small"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(tmp_path, monkeypatch):
+    """Prevent tests from reading the real ~/.omlx-privatenet/disabled file."""
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+
+
 def make_transport_handler(remote_behavior):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)

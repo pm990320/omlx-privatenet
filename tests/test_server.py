@@ -10,6 +10,12 @@ CHAT_MODEL = "gemma-4-26b-a4b-it-4bit"
 EMBED_MODEL = "text-embedding-3-small"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(tmp_path, monkeypatch):
+    """Prevent tests from reading the real ~/.omlx-privatenet/disabled file."""
+    monkeypatch.setenv("OMLX_PRIVATENET_STATE_DIR", str(tmp_path))
+
+
 class MockAsyncStream(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
