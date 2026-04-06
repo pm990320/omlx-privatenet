@@ -695,6 +695,9 @@ ensure_venv() {
     "$PIP_BIN" install --upgrade xgrammar || die "Failed to install xgrammar."
     success "xgrammar installed."
 
+  fi
+
+  if [ "$INSTALL_MODE" != "client" ]; then
     info "Installing our custom AI language model library (adds Gemma 4 support)..."
     "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_FORK" || die "Failed to install mlx-lm fork."
     success "Custom mlx-lm installed."
