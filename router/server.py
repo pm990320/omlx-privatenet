@@ -24,7 +24,7 @@ from .config import RouterConfig, load_config, resolve_config_path
 from .health import NodeHealthMonitor
 from .registry import Registry
 from .router import ConsistentHashRouter, NodeInfo, RouteDecision
-from .updater import get_rollback_info
+from .updater import AutoUpdater, get_rollback_info
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -80,9 +80,27 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             app.state.auto_downloader = auto_downloader
             app.state.auto_download_task = auto_download_task
 
+        auto_updater: AutoUpdater | None = None
+        auto_update_task: asyncio.Task[None] | None = None
+        if config.auto_update:
+            auto_updater = AutoUpdater(config)
+            auto_update_task = asyncio.create_task(
+                auto_updater.run_forever(), name="omlx-privatenet-autoupdate"
+            )
+            app.state.auto_updater = auto_updater
+            app.state.auto_update_task = auto_update_task
+
         try:
             yield
         finally:
+            if auto_updater is not None:
+                await auto_updater.stop()
+            if auto_update_task is not None:
+                auto_update_task.cancel()
+                try:
+                    await auto_update_task
+                except asyncio.CancelledError:
+                    pass
             if auto_downloader is not None:
                 await auto_downloader.stop()
             if auto_download_task is not None:

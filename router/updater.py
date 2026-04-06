@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Auto-updater for oMLX PrivateNet: version tracking, update execution, drain, and rollback."""
 
+import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -13,7 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .config import RouterConfig
+
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 MLX_LM_FORK = "git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
 
@@ -473,3 +479,77 @@ def get_rollback_info(state_dir: Path | None = None) -> dict[str, Any] | None:
             return json.load(f)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 7. Background auto-update loop
+# ---------------------------------------------------------------------------
+
+
+class AutoUpdater:
+    """Background auto-update loop.
+
+    Periodically checks for a newer version and applies the update using
+    drain_and_run + update_with_rollback when one is available.
+    """
+
+    def __init__(self, config: RouterConfig) -> None:
+        self.config = config
+        self._stop = asyncio.Event()
+
+    async def run_forever(self) -> None:
+        """Check for updates every ``update_interval_hours``."""
+        while not self._stop.is_set():
+            try:
+                await self.run_once()
+            except Exception:  # noqa: BLE001
+                logger.exception("Auto-update cycle failed")
+            try:
+                interval = self.config.update_interval_hours * 3600
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                continue
+
+    async def run_once(self) -> None:
+        """Check for an update and apply it if available."""
+        info = await asyncio.to_thread(check_for_update)
+        if not info.available:
+            logger.debug(
+                "Auto-update: up to date (local=%s, remote=%s)",
+                info.local_version,
+                info.remote_version,
+            )
+            return
+
+        logger.info(
+            "Auto-update: update available %s -> %s, applying...",
+            info.local_version,
+            info.remote_version,
+        )
+
+        health_url = f"http://127.0.0.1:{self.config.port}"
+
+        result: UpdateResult = await asyncio.to_thread(
+            lambda: drain_and_run(
+                lambda: update_with_rollback(
+                    privatenet_src=_privatenet_src(),
+                    state_dir=_state_dir(),
+                    venv_dir=_venv_bin().parent,
+                    health_url=health_url,
+                ),
+                health_url=health_url,
+            )
+        )
+
+        if result.success:
+            logger.info(
+                "Auto-update: successfully updated %s -> %s",
+                result.previous_sha,
+                result.new_sha,
+            )
+        else:
+            logger.error("Auto-update: update failed: %s", result.error)
+
+    async def stop(self) -> None:
+        """Signal the loop to exit."""
+        self._stop.set()

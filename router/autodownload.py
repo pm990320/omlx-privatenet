@@ -203,6 +203,9 @@ class AutoDownloader:
             if result.returncode == 0:
                 logger.info("Auto-download: successfully downloaded %s", model.id)
                 existing_gb += model_gb
+                # Run eviction if over GB cap
+                if max_gb is not None:
+                    await self._maybe_evict(registry, model_dir, max_gb)
             else:
                 logger.error(
                     "Auto-download: failed to download %s — exit code %d: %s",
@@ -210,6 +213,36 @@ class AutoDownloader:
                     result.returncode,
                     result.stderr[:500] if result.stderr else "(no output)",
                 )
+
+    async def _maybe_evict(
+        self, registry: Registry, model_dir: Path, max_gb: float
+    ) -> None:
+        """Run eviction if disk usage exceeds the GB cap."""
+        from .eviction import execute_eviction, plan_eviction
+
+        try:
+            plan = await asyncio.to_thread(
+                plan_eviction,
+                model_dir,
+                registry,
+                max_gb,
+                self.config.advertise_models,
+                self.config.local_omlx_url,
+                self.config.local_omlx_api_key,
+            )
+            if plan.models_to_evict:
+                logger.info(
+                    "Auto-download eviction: %s (%s)",
+                    plan.reason,
+                    ", ".join(plan.models_to_evict),
+                )
+                deleted = await asyncio.to_thread(
+                    execute_eviction, plan, model_dir
+                )
+                if deleted:
+                    logger.info("Auto-download eviction: removed %s", ", ".join(deleted))
+        except Exception:  # noqa: BLE001
+            logger.exception("Eviction after download failed")
 
     async def stop(self) -> None:
         """Signal the loop to exit."""

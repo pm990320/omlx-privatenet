@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from router.updater import (
+    AutoUpdater,
     UpdateInfo,
     UpdateResult,
     check_for_update,
@@ -621,3 +622,64 @@ class TestUpdateWithRollback:
         assert rollback_file.exists()
         info = json.loads(rollback_file.read_text())
         assert info["reason"] == "automatic rollback after failed health check"
+
+
+# ---------------------------------------------------------------------------
+# 7. AutoUpdater
+# ---------------------------------------------------------------------------
+
+class TestAutoUpdater:
+    @pytest.fixture()
+    def config(self) -> "RouterConfig":
+        from router.config import RouterConfig
+        return RouterConfig(auto_update=True, update_interval_hours=1)
+
+    @pytest.mark.asyncio
+    async def test_auto_updater_skips_when_no_update(self, config: "RouterConfig") -> None:
+        """run_once should not call update_with_rollback when no update is available."""
+        no_update = UpdateInfo(
+            available=False,
+            local_version="0.3.0",
+            remote_version="0.3.0",
+            local_sha="abc1234",
+            remote_sha="abc1234",
+        )
+        updater = AutoUpdater(config)
+        with (
+            patch("router.updater.check_for_update", return_value=no_update) as mock_check,
+            patch("router.updater.update_with_rollback") as mock_update,
+            patch("router.updater.drain_and_run") as mock_drain,
+        ):
+            await updater.run_once()
+
+        mock_check.assert_called_once()
+        mock_update.assert_not_called()
+        mock_drain.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_updater_applies_update(self, config: "RouterConfig") -> None:
+        """run_once should call drain_and_run -> update_with_rollback when an update is available."""
+        has_update = UpdateInfo(
+            available=True,
+            local_version="0.3.0",
+            remote_version="0.4.0",
+            local_sha="abc1234",
+            remote_sha="def5678",
+        )
+        success_result = UpdateResult(
+            success=True,
+            previous_sha="abc1234",
+            new_sha="def5678",
+            error=None,
+        )
+        updater = AutoUpdater(config)
+        with (
+            patch("router.updater.check_for_update", return_value=has_update),
+            patch("router.updater.drain_and_run", return_value=success_result) as mock_drain,
+        ):
+            await updater.run_once()
+
+        mock_drain.assert_called_once()
+        # The first arg to drain_and_run should be a callable
+        callback = mock_drain.call_args[0][0]
+        assert callable(callback)

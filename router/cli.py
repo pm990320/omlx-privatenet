@@ -181,6 +181,18 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(f"\n  {GREEN}This node will now advertise all available models (default).{RESET}\n")
         return 0
 
+    # privatenet models evict [--dry-run]
+    if args.models_action == "evict":
+        return cmd_models_evict(args)
+
+    # privatenet models pin <model-id>
+    if args.models_action == "pin":
+        return cmd_models_pin(args)
+
+    # privatenet models unpin <model-id>
+    if args.models_action == "unpin":
+        return cmd_models_unpin(args)
+
     # privatenet models (no subcommand — show current state)
     advertise = config.get("advertise_models")
     health = _check_router_health()
@@ -208,6 +220,91 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"\n  {BOLD}Cluster total:{RESET} {len(all_models)} model(s)")
 
     print()
+    return 0
+
+
+def cmd_models_evict(args: argparse.Namespace) -> int:
+    """Evict models to stay under the GB cap."""
+    from router.config import load_config
+    from router.eviction import execute_eviction, plan_eviction
+    from router.registry import Registry
+
+    config = load_config()
+    model_dir = Path(os.environ.get("OMLX_MODELS_DIR", Path.home() / ".omlx" / "models"))
+    registry = Registry(path=_state_dir() / "registry.json")
+    registry.load()
+
+    plan = plan_eviction(
+        model_dir=model_dir,
+        registry=registry,
+        max_gb=config.auto_download_max_gb,
+        advertise_models=config.advertise_models,
+        omlx_url=config.local_omlx_url,
+        omlx_api_key=config.local_omlx_api_key,
+    )
+
+    if not plan.models_to_evict:
+        print(f"\n  {GREEN}Nothing to evict.{RESET} {plan.reason}\n")
+        return 0
+
+    dry_run = getattr(args, "dry_run", False)
+    label = "Would evict" if dry_run else "Evicting"
+
+    print(f"\n  {BOLD}{label} {len(plan.models_to_evict)} model(s){RESET}")
+    print(f"  {DIM}{plan.reason}{RESET}")
+    print(f"  {'─' * 40}")
+    for model_id in plan.models_to_evict:
+        print(f"  - {model_id}")
+
+    deleted = execute_eviction(plan, model_dir, dry_run=dry_run)
+
+    if dry_run:
+        print(f"\n  {YELLOW}Dry run — no files were deleted.{RESET}\n")
+    else:
+        print(f"\n  {GREEN}Evicted {len(deleted)} model(s).{RESET}\n")
+
+    return 0
+
+
+def cmd_models_pin(args: argparse.Namespace) -> int:
+    """Pin a model to prevent eviction."""
+    from router.eviction import load_pinned, save_pinned
+
+    model_id = args.model_names[0] if args.model_names else None
+    if not model_id:
+        print(f"\n  {RED}No model specified.{RESET}")
+        print(f"  {DIM}Usage: privatenet models pin <model-id>{RESET}\n")
+        return 1
+
+    pinned = load_pinned()
+    if model_id in pinned:
+        print(f"\n  {YELLOW}{model_id} is already pinned.{RESET}\n")
+        return 0
+
+    pinned.append(model_id)
+    save_pinned(pinned)
+    print(f"\n  {GREEN}Pinned {model_id} — it will not be evicted.{RESET}\n")
+    return 0
+
+
+def cmd_models_unpin(args: argparse.Namespace) -> int:
+    """Unpin a model to allow eviction."""
+    from router.eviction import load_pinned, save_pinned
+
+    model_id = args.model_names[0] if args.model_names else None
+    if not model_id:
+        print(f"\n  {RED}No model specified.{RESET}")
+        print(f"  {DIM}Usage: privatenet models unpin <model-id>{RESET}\n")
+        return 1
+
+    pinned = load_pinned()
+    if model_id not in pinned:
+        print(f"\n  {YELLOW}{model_id} is not pinned.{RESET}\n")
+        return 0
+
+    pinned.remove(model_id)
+    save_pinned(pinned)
+    print(f"\n  {GREEN}Unpinned {model_id} — it may now be evicted.{RESET}\n")
     return 0
 
 
@@ -360,8 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("enable", help="Bring this node back into service")
 
     models_parser = sub.add_parser("models", help="Show or configure which models to advertise")
-    models_parser.add_argument("models_action", nargs="?", choices=["set", "reset"], default=None)
+    models_parser.add_argument("models_action", nargs="?", choices=["set", "reset", "evict", "pin", "unpin"], default=None)
     models_parser.add_argument("model_names", nargs="*", default=[])
+    models_parser.add_argument("--dry-run", action="store_true", dest="dry_run", help="Show what would be evicted without deleting")
 
     # registry subcommand
     registry_parser = sub.add_parser("registry", help="Manage the shared model registry")
