@@ -1143,14 +1143,6 @@ main() {
   fi
   ensure_venv
 
-  # ── Models (full node fresh install only) ──────────────────────────────
-  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ] && [ "$SKIP_MODELS" != "1" ]; then
-    step "Downloading AI models" "These are the actual AI brains — two versions of Google's Gemma 4."
-    info "This is the longest step. Total download: ~33 GB."
-    printf '\n'
-    ensure_models
-  fi
-
   # ── Configuration ──────────────────────────────────────────────────────
   step "Writing configuration" "Creating the local config files for the router."
   ensure_node_id
@@ -1207,6 +1199,16 @@ main() {
   if [ "$INSTALL_OPENCLAW" = "true" ]; then
     step "Setting up OpenClaw" "Installing the openclaw-omlx plugin so OpenClaw can use your PrivateNet models."
     install_openclaw_plugin
+  fi
+
+  # ── Models (last step — everything else works while this downloads) ──
+  if [ "$INSTALL_MODE" != "client" ] && [ "$EXISTING_OMLX" = "false" ] && [ "$SKIP_MODELS" != "1" ]; then
+    step "Downloading AI models" "These are the actual AI brains — two versions of Google's Gemma 4."
+    info "Everything else is already running. The router will discover these models"
+    info "automatically once the download finishes and oMLX picks them up."
+    info "Total download: ~33 GB."
+    printf '\n'
+    ensure_models
   fi
 
   print_summary
