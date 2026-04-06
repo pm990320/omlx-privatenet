@@ -2,9 +2,12 @@
 """CLI for managing an oMLX PrivateNet node.
 
 Usage:
-    privatenet status    Show whether this node is enabled or disabled
-    privatenet disable   Take this node out of service (peers stop routing here)
-    privatenet enable    Bring this node back into service
+    privatenet status              Show node status
+    privatenet disable             Take this node out of service
+    privatenet enable              Bring this node back into service
+    privatenet models              Show which models are advertised
+    privatenet models set A B C    Only advertise these models
+    privatenet models reset        Advertise all models (default)
 """
 from __future__ import annotations
 
@@ -117,6 +120,78 @@ def cmd_enable(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_router_config() -> dict:
+    """Load router.json as a dict."""
+    try:
+        with _router_config().open() as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_router_config(config: dict) -> None:
+    """Write router.json back."""
+    _router_config().parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _router_config().open("w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    """Show or configure which models this node advertises."""
+    config = _load_router_config()
+
+    # privatenet models set model1 model2 ...
+    if args.models_action == "set":
+        if not args.model_names:
+            print(f"\n  {RED}No models specified.{RESET}")
+            print(f"  {DIM}Usage: privatenet models set model-a model-b{RESET}\n")
+            return 1
+        config["advertise_models"] = args.model_names
+        _save_router_config(config)
+        print(f"\n  {GREEN}This node will now only advertise:{RESET}")
+        for m in args.model_names:
+            print(f"  - {m}")
+        print(f"\n  {DIM}Restart the router or wait ~30s for changes to take effect.{RESET}\n")
+        return 0
+
+    # privatenet models reset
+    if args.models_action == "reset":
+        config.pop("advertise_models", None)
+        _save_router_config(config)
+        print(f"\n  {GREEN}This node will now advertise all available models (default).{RESET}\n")
+        return 0
+
+    # privatenet models (no subcommand — show current state)
+    advertise = config.get("advertise_models")
+    health = _check_router_health()
+
+    print(f"\n  {BOLD}Model Configuration{RESET}")
+    print(f"  {'─' * 40}")
+
+    if advertise is not None:
+        print(f"  Filter:    {YELLOW}allowlist ({len(advertise)} model(s)){RESET}")
+        for m in advertise:
+            print(f"    - {m}")
+    else:
+        print(f"  Filter:    {GREEN}all models (default){RESET}")
+
+    if health:
+        cluster = health.get("cluster", [])
+        local = next((n for n in cluster if n.get("local")), None)
+        if local:
+            models = local.get("models", [])
+            print(f"\n  {BOLD}Currently advertised:{RESET} {len(models)} model(s)")
+            for m in models:
+                print(f"    - {m}")
+        all_models = health.get("models", [])
+        if all_models:
+            print(f"\n  {BOLD}Cluster total:{RESET} {len(all_models)} model(s)")
+
+    print()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="privatenet",
@@ -127,6 +202,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show whether this node is enabled or disabled")
     sub.add_parser("disable", help="Take this node out of service")
     sub.add_parser("enable", help="Bring this node back into service")
+
+    models_parser = sub.add_parser("models", help="Show or configure which models to advertise")
+    models_parser.add_argument("models_action", nargs="?", choices=["set", "reset"], default=None)
+    models_parser.add_argument("model_names", nargs="*", default=[])
 
     return parser
 
@@ -139,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "disable": cmd_disable,
         "enable": cmd_enable,
+        "models": cmd_models,
     }
 
     handler = commands.get(args.command)

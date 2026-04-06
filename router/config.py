@@ -37,6 +37,7 @@ class RouterConfig:
     local_omlx_api_key: str | None = None
     local_models: list[str] = field(default_factory=lambda: list(DEFAULT_LOCAL_MODELS))
     local_max_concurrent: int = 8
+    advertise_models: list[str] | None = None  # None = all models, list = only these
     source_path: Path | None = None
 
     @classmethod
@@ -69,6 +70,7 @@ class RouterConfig:
             local_omlx_api_key=(str(data["local_omlx_api_key"]) if data.get("local_omlx_api_key") else None),
             local_models=[str(model) for model in local_models],
             local_max_concurrent=max(1, int(data.get("local_max_concurrent", 8))),
+            advertise_models=([str(m) for m in data["advertise_models"]] if isinstance(data.get("advertise_models"), list) else None),
             source_path=source_path,
         )
 

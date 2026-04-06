@@ -71,6 +71,48 @@ def test_status_shows_disabled_after_disable(with_router_config, capsys):
     assert "disabled" in captured.out
 
 
+def test_models_shows_all_by_default(with_router_config, capsys):
+    result = cli_main(["models"])
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "all models" in captured.out
+
+
+def test_models_set_writes_allowlist(with_router_config, capsys):
+    result = cli_main(["models", "set", "model-a", "model-b"])
+    assert result == 0
+    import json
+    with (with_router_config / "router.json").open() as f:
+        config = json.load(f)
+    assert config["advertise_models"] == ["model-a", "model-b"]
+
+
+def test_models_reset_removes_allowlist(with_router_config, capsys):
+    cli_main(["models", "set", "model-a"])
+    result = cli_main(["models", "reset"])
+    assert result == 0
+    import json
+    with (with_router_config / "router.json").open() as f:
+        config = json.load(f)
+    assert "advertise_models" not in config
+
+
+def test_models_set_no_args_returns_error(with_router_config, capsys):
+    result = cli_main(["models", "set"])
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "No models specified" in captured.out
+
+
+def test_models_shows_allowlist_after_set(with_router_config, capsys):
+    cli_main(["models", "set", "model-x"])
+    result = cli_main(["models"])
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "allowlist" in captured.out
+    assert "model-x" in captured.out
+
+
 def test_no_command_prints_help(capsys):
     result = cli_main([])
     assert result == 1

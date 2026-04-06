@@ -141,11 +141,17 @@ class NodeHealthMonitor:
             last_error = "node administratively disabled"
         elif not healthy:
             last_error = "local oMLX did not respond in time"
+        # Filter through advertise_models allowlist if configured
+        models = available_models or list(self.config.local_models)
+        if self.config.advertise_models is not None:
+            allowed = set(self.config.advertise_models)
+            models = [m for m in models if m in allowed]
+
         return NodeInfo(
             node_id=peer.node_id,
             tailscale_ip=peer.tailscale_ip,
             router_url=peer.router_url,
-            models=available_models or list(self.config.local_models),
+            models=models,
             in_flight=inflight,
             max_concurrent=self.config.local_max_concurrent,
             healthy=healthy,
