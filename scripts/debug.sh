@@ -65,6 +65,17 @@ if [ -n "$TS_BIN" ]; then
     bad "Tag: tag:omlx-node NOT advertised (current tags: ${SELF_TAGS:-none})"
   fi
 
+  # Check shields-up (blocks all inbound connections)
+  SHIELDS_UP="$($TS_BIN debug prefs 2>/dev/null | grep -o '"ShieldsUp": *[a-z]*' | grep -o 'true\|false')"
+  if [ "$SHIELDS_UP" = "true" ]; then
+    bad "ShieldsUp is ON — other nodes CANNOT reach this machine"
+    info "Fix: tailscale set --shields-up=false"
+  elif [ "$SHIELDS_UP" = "false" ]; then
+    ok "ShieldsUp is off (inbound connections allowed)"
+  else
+    info "Could not determine ShieldsUp status"
+  fi
+
   info "Peers with tag:omlx-node:"
   $TS_BIN status --json 2>/dev/null > /tmp/omlx-debug-ts.json 2>/dev/null
   python3 << 'PYEOF'

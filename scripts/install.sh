@@ -1138,6 +1138,16 @@ main() {
   step "Connecting to Tailscale" "Tailscale creates a secure private network between all the Macs."
   ensure_tailscale_ip
 
+  # Check shields-up — blocks all inbound, peers can't reach this node
+  ensure_tailscale_cli
+  local shields_up
+  shields_up="$(tailscale debug prefs 2>/dev/null | grep -o '"ShieldsUp": *[a-z]*' | grep -o 'true\|false' || true)"
+  if [ "$shields_up" = "true" ]; then
+    warn "Tailscale ShieldsUp is enabled — other PrivateNet nodes cannot connect to this Mac."
+    info "Disabling ShieldsUp so peers can reach the router..."
+    tailscale set --shields-up=false 2>/dev/null && success "ShieldsUp disabled." || warn "Could not disable ShieldsUp. Run: tailscale set --shields-up=false"
+  fi
+
   # ── Step 5: Tag (nodes only — clients don't need to be discovered) ────
   if [ "$INSTALL_MODE" != "client" ]; then
     step "Advertising the PrivateNet tag" "Peers find each other automatically by the Tailscale tag $TAILSCALE_TAG."
