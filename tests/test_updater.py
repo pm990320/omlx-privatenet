@@ -21,6 +21,7 @@ from router.updater import (
     get_rollback_info,
     rollback,
     run_update,
+    update_with_rollback,
 )
 
 
@@ -523,3 +524,100 @@ class TestRollback:
         info = get_rollback_info(state_dir=state)
         assert info is not None
         assert info["reason"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# 6. update_with_rollback
+# ---------------------------------------------------------------------------
+
+class TestUpdateWithRollback:
+    def test_update_with_rollback_healthy(self, tmp_path: Path) -> None:
+        """When health returns 'ok' after update, no rollback should occur."""
+        src = tmp_path / "src"
+        src.mkdir()
+        state = tmp_path / "state"
+
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "abc1234\n"
+            result.stderr = ""
+            return result
+
+        def mock_urlopen(req, *, timeout=None):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            return mock_resp
+
+        with (
+            patch("router.updater._privatenet_src", return_value=src),
+            patch("router.updater._state_dir", return_value=state),
+            patch("router.updater._venv_bin", return_value=tmp_path / "venv" / "bin"),
+            patch("subprocess.run", side_effect=mock_run),
+            patch("router.updater.time.sleep"),  # skip waits
+            patch("urllib.request.urlopen", side_effect=mock_urlopen),
+        ):
+            result = update_with_rollback(
+                privatenet_src=src,
+                state_dir=state,
+                venv_dir=tmp_path / "venv",
+            )
+
+        assert result.success is True
+        assert result.error is None
+        # No rollback.json should exist
+        assert not (state / "rollback.json").exists()
+
+    def test_update_with_rollback_unhealthy(self, tmp_path: Path) -> None:
+        """When health check fails after update, rollback should be triggered."""
+        src = tmp_path / "src"
+        src.mkdir()
+        state = tmp_path / "state"
+        state.mkdir()
+
+        # Pre-write update-state so rollback() can find the previous SHA
+        update_state_file = state / "update-state.json"
+        update_state_file.write_text(json.dumps({
+            "previous_sha": "old1234",
+            "new_sha": "new5678",
+        }), encoding="utf-8")
+
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "abc1234\n"
+            result.stderr = ""
+            return result
+
+        def mock_urlopen(req, *, timeout=None):
+            """Always return an error status to simulate unhealthy router."""
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"status": "error"}).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            return mock_resp
+
+        with (
+            patch("router.updater._privatenet_src", return_value=src),
+            patch("router.updater._state_dir", return_value=state),
+            patch("router.updater._venv_bin", return_value=tmp_path / "venv" / "bin"),
+            patch("subprocess.run", side_effect=mock_run),
+            patch("router.updater.time.sleep"),  # skip waits
+            patch("router.updater.time.monotonic", side_effect=[0, 0, 100]),  # first call for deadline, second for while check, third to exceed deadline
+            patch("urllib.request.urlopen", side_effect=mock_urlopen),
+        ):
+            result = update_with_rollback(
+                privatenet_src=src,
+                state_dir=state,
+                venv_dir=tmp_path / "venv",
+            )
+
+        assert result.success is False
+        assert "rolled back" in (result.error or "").lower()
+        # rollback.json should exist
+        rollback_file = state / "rollback.json"
+        assert rollback_file.exists()
+        info = json.loads(rollback_file.read_text())
+        assert info["reason"] == "automatic rollback after failed health check"

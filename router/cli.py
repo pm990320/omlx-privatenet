@@ -90,6 +90,18 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"  Router:    {color}{router_status}{RESET}")
         print(f"  Cluster:   {len(cluster)} node(s), {len(models)} model(s)")
 
+        rollback = health.get("rollback")
+        if rollback:
+            rolled_from = rollback.get("rolled_back_from", "unknown")
+            rolled_to = rollback.get("rolled_back_to", "unknown")
+            ts = rollback.get("timestamp")
+            if ts:
+                from datetime import datetime, timezone
+                time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            else:
+                time_str = "unknown"
+            print(f"  Rollback:  {YELLOW}active{RESET} (reverted from {rolled_from} to {rolled_to} at {time_str})")
+
     print()
     return 0
 

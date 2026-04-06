@@ -399,6 +399,69 @@ def rollback(
     return True
 
 
+def update_with_rollback(
+    privatenet_src: Path | None = None,
+    state_dir: Path | None = None,
+    venv_dir: Path | None = None,
+    health_url: str = "http://127.0.0.1:8741",
+) -> UpdateResult:
+    """Run an update and verify health afterward, rolling back on failure.
+
+    1. Calls run_update() to perform the update.
+    2. If the update succeeded, waits 10 seconds for the router to restart.
+    3. Polls GET {health_url}/health for up to 30 seconds (every 5s).
+       If status != "ok", calls rollback().
+    4. Returns the update result with rollback info if applicable.
+    """
+    result = run_update()
+    if not result.success:
+        return result
+
+    # Wait for the router to restart after code update
+    time.sleep(10)
+
+    # Poll health endpoint
+    src = privatenet_src or _privatenet_src()
+    state = state_dir or _state_dir()
+    healthy = False
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            req = urllib.request.Request(f"{health_url}/health")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            if data.get("status") == "ok":
+                healthy = True
+                break
+        except Exception:
+            pass
+        time.sleep(5)
+
+    if not healthy:
+        rolled_back = rollback(privatenet_src=src, state_dir=state)
+        if rolled_back:
+            # Update the rollback.json reason to reflect automatic rollback
+            rollback_file = state / "rollback.json"
+            if rollback_file.exists():
+                try:
+                    with rollback_file.open("r", encoding="utf-8") as f:
+                        info = json.load(f)
+                    info["reason"] = "automatic rollback after failed health check"
+                    with rollback_file.open("w", encoding="utf-8") as f:
+                        json.dump(info, f, indent=2)
+                        f.write("\n")
+                except Exception:
+                    pass
+            result = UpdateResult(
+                success=False,
+                previous_sha=result.previous_sha,
+                new_sha=result.new_sha,
+                error="Health check failed after update; rolled back",
+            )
+
+    return result
+
+
 def get_rollback_info(state_dir: Path | None = None) -> dict[str, Any] | None:
     """Read rollback.json if it exists, for health endpoint reporting."""
     state = state_dir or _state_dir()

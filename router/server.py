@@ -19,10 +19,12 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from .autodownload import AutoDownloader
 from .config import RouterConfig, load_config, resolve_config_path
 from .health import NodeHealthMonitor
 from .registry import Registry
 from .router import ConsistentHashRouter, NodeInfo, RouteDecision
+from .updater import get_rollback_info
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -67,9 +69,28 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         await monitor.run_once()
         task = asyncio.create_task(monitor.run_forever(), name="omlx-privatenet-discovery")
         app.state.health_task = task
+
+        auto_downloader: AutoDownloader | None = None
+        auto_download_task: asyncio.Task[None] | None = None
+        if config.auto_download:
+            auto_downloader = AutoDownloader(config)
+            auto_download_task = asyncio.create_task(
+                auto_downloader.run_forever(), name="omlx-privatenet-autodownload"
+            )
+            app.state.auto_downloader = auto_downloader
+            app.state.auto_download_task = auto_download_task
+
         try:
             yield
         finally:
+            if auto_downloader is not None:
+                await auto_downloader.stop()
+            if auto_download_task is not None:
+                auto_download_task.cancel()
+                try:
+                    await auto_download_task
+                except asyncio.CancelledError:
+                    pass
             await monitor.stop()
             task.cancel()
             try:
@@ -94,7 +115,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     async def health() -> dict[str, Any]:
         """Return local router status plus the currently known cluster view."""
         disabled = _is_node_disabled()
-        return {
+        result = {
             "status": "disabled" if disabled else "ok",
             "router": {
                 "host": config.host,
@@ -104,6 +125,10 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
             "cluster": router.snapshot()["nodes"],
             "models": router.aggregate_models(),
         }
+        rollback_info = get_rollback_info()
+        if rollback_info:
+            result["rollback"] = rollback_info
+        return result
 
     @app.get("/v1/node-info")
     async def node_info() -> dict[str, Any]:
