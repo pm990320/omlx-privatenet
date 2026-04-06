@@ -15,6 +15,8 @@ from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
+MLX_LM_FORK = "git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -43,6 +45,14 @@ def _venv_bin() -> Path:
         return Path(env) / "bin"
     # Walk up from the running interpreter to find the venv bin
     return Path(sys.executable).parent
+
+
+def _omlx_src() -> Path:
+    """Return the oMLX source checkout path (~/omlx-privatenet/omlx by default)."""
+    env = os.environ.get("OMLX_SRC")
+    if env:
+        return Path(env)
+    return Path.home() / "omlx-privatenet" / "omlx"
 
 
 def _disabled_file() -> Path:
@@ -230,6 +240,46 @@ def run_update(
                 previous_sha=previous_sha,
                 new_sha=previous_sha,
                 error=f"pip install failed: {exc.stderr or exc.stdout or str(exc)}",
+            )
+
+    # Update oMLX source if present (server mode only)
+    omlx_src = _omlx_src()
+    if omlx_src.is_dir():
+        try:
+            # Fetch latest tags
+            subprocess.run(
+                ["git", "-C", str(omlx_src), "fetch", "--tags", "origin"],
+                capture_output=True, text=True, check=True,
+            )
+            # Get the latest tag
+            tag_result = subprocess.run(
+                ["git", "-C", str(omlx_src), "describe", "--tags", "--abbrev=0",
+                 "origin/HEAD"],
+                capture_output=True, text=True, check=True,
+            )
+            latest_tag = tag_result.stdout.strip()
+            if latest_tag:
+                subprocess.run(
+                    ["git", "-C", str(omlx_src), "checkout", latest_tag],
+                    capture_output=True, text=True, check=True,
+                )
+            # Reinstall oMLX in editable mode
+            pip = str(venv_bin / "pip")
+            subprocess.run(
+                [pip, "install", "-e", str(omlx_src)],
+                capture_output=True, text=True, check=True,
+            )
+            # Reinstall the mlx-lm fork
+            subprocess.run(
+                [pip, "install", "--upgrade", "--force-reinstall", MLX_LM_FORK],
+                capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            return UpdateResult(
+                success=False,
+                previous_sha=previous_sha,
+                new_sha=previous_sha,
+                error=f"oMLX update failed: {exc.stderr or exc.stdout or str(exc)}",
             )
 
     # Capture new SHA

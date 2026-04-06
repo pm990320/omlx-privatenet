@@ -304,7 +304,7 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def cmd_update(args: argparse.Namespace) -> int:
     """Check for or apply updates."""
-    from router.updater import check_for_update, run_update
+    from router.updater import check_for_update, drain_and_run, run_update
 
     info = check_for_update()
 
@@ -325,7 +325,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 0
 
     print(f"\n  Updating {info.local_version} -> {info.remote_version} ...")
-    result = run_update()
+    print(f"  {DIM}Draining in-flight requests...{RESET}")
+    result = drain_and_run(run_update)
     if result.success:
         print(f"  {GREEN}Updated successfully.{RESET}")
         print(f"  {DIM}{result.previous_sha} -> {result.new_sha}{RESET}\n")
