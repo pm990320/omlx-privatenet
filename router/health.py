@@ -164,10 +164,12 @@ class NodeHealthMonitor:
             last_error = "node administratively disabled"
         elif not healthy:
             last_error = "local oMLX did not respond in time"
-        # Filter through advertise_models allowlist if configured
+        # Filter through advertise_models allowlist — re-read from disk
+        # each cycle so CLI changes take effect without a router restart
         models = available_models or list(self.config.local_models)
-        if self.config.advertise_models is not None:
-            allowed = set(self.config.advertise_models)
+        advertise = self._read_advertise_models()
+        if advertise is not None:
+            allowed = set(advertise)
             models = [m for m in models if m in allowed]
 
         return NodeInfo(
@@ -215,6 +217,20 @@ class NodeHealthMonitor:
         if not self.config.local_omlx_api_key:
             return {}
         return {"Authorization": f"Bearer {self.config.local_omlx_api_key}"}
+
+    def _read_advertise_models(self) -> list[str] | None:
+        """Re-read advertise_models from router.json so CLI changes are picked up live."""
+        config_path = self.config.source_path
+        if config_path is None or not config_path.exists():
+            return self.config.advertise_models
+        try:
+            import json
+            with config_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            am = data.get("advertise_models")
+            return [str(m) for m in am] if isinstance(am, list) else None
+        except Exception:  # noqa: BLE001
+            return self.config.advertise_models
 
     @staticmethod
     def _is_node_disabled() -> bool:
