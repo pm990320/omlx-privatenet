@@ -262,7 +262,7 @@ def run_update(
                 error=f"pip install failed: {exc.stderr or exc.stdout or str(exc)}",
             )
 
-    # Update oMLX source if present (server mode only)
+    # Update oMLX source if present (fresh installs only, not existing oMLX)
     omlx_src = _omlx_src()
     if omlx_src.is_dir():
         try:
@@ -275,16 +275,9 @@ def run_update(
                 ["git", "-C", str(omlx_src), "checkout", "-f", omlx_ref],
                 capture_output=True, text=True, check=True,
             )
-            # Reinstall oMLX in editable mode
             pip = str(venv_bin / "pip")
             subprocess.run(
                 [pip, "install", "-e", str(omlx_src)],
-                capture_output=True, text=True, check=True,
-            )
-            # Reinstall mlx-lm (reads package spec from install.sh)
-            mlx_lm_pkg = _read_install_var("MLX_LM_PACKAGE", "mlx-lm")
-            subprocess.run(
-                [pip, "install", "--upgrade", "--force-reinstall", mlx_lm_pkg],
                 capture_output=True, text=True, check=True,
             )
         except subprocess.CalledProcessError as exc:
@@ -294,6 +287,22 @@ def run_update(
                 new_sha=previous_sha,
                 error=f"oMLX update failed: {exc.stderr or exc.stdout or str(exc)}",
             )
+
+    # Always reinstall mlx-lm (reads package spec from install.sh)
+    try:
+        pip = str(venv_bin / "pip")
+        mlx_lm_pkg = _read_install_var("MLX_LM_PACKAGE", "mlx-lm")
+        subprocess.run(
+            [pip, "install", "--upgrade", "--force-reinstall", mlx_lm_pkg],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        return UpdateResult(
+            success=False,
+            previous_sha=previous_sha,
+            new_sha=previous_sha,
+            error=f"mlx-lm install failed: {exc.stderr or exc.stdout or str(exc)}",
+        )
 
     # Capture new SHA
     try:

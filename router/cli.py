@@ -429,11 +429,15 @@ def cmd_update(args: argparse.Namespace) -> int:
         print()
         return 0
 
-    if not info.available:
-        print(f"\n  {GREEN}Already up to date ({info.local_version}).{RESET}\n")
+    if not info.available and not getattr(args, "force", False):
+        print(f"\n  {GREEN}Router code is up to date ({info.local_version}).{RESET}")
+        print(f"  {DIM}Re-run with --force to reinstall dependencies anyway.{RESET}\n")
         return 0
 
-    print(f"\n  Updating {info.local_version} -> {info.remote_version} ...")
+    if info.available:
+        print(f"\n  Updating {info.local_version} -> {info.remote_version} ...")
+    else:
+        print(f"\n  Reinstalling dependencies (code already at {info.local_version})...")
     print(f"  {DIM}Draining in-flight requests...{RESET}")
     result = drain_and_run(run_update)
     if result.success:
@@ -476,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     # update subcommand
     update_parser = sub.add_parser("update", help="Check for or apply updates")
     update_parser.add_argument("--check", action="store_true", help="Only check for updates, don't apply")
+    update_parser.add_argument("--force", action="store_true", help="Reinstall dependencies even if code is up to date")
 
     return parser
 

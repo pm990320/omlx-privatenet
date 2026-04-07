@@ -678,7 +678,7 @@ def test_update_already_up_to_date(with_router_config, capsys, monkeypatch):
     result = cli_main(["update"])
     assert result == 0
     captured = capsys.readouterr()
-    assert "Already up to date" in captured.out
+    assert "up to date" in captured.out
 
 
 def test_update_success(with_router_config, capsys, monkeypatch):

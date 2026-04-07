@@ -989,15 +989,15 @@ class TestRunUpdateEdgeCases:
         def mock_run(cmd, **kwargs):
             nonlocal call_index
             call_index += 1
-            if call_index <= 3:
-                # rev-parse prev, fetch, reset
-                result = MagicMock()
-                result.returncode = 0
-                result.stdout = "abc1234\n"
-                result.stderr = ""
-                return result
-            # rev-parse for new SHA fails
-            raise FileNotFoundError("no git")
+            cmd_str = " ".join(str(c) for c in cmd)
+            # The final rev-parse (for new SHA) should fail
+            if "rev-parse" in cmd_str and call_index > 1:
+                raise FileNotFoundError("no git")
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "abc1234\n"
+            result.stderr = ""
+            return result
 
         with (
             patch("router.updater._privatenet_src", return_value=src),
