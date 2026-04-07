@@ -506,9 +506,18 @@ class AutoUpdater:
 
     async def run_forever(self) -> None:
         """Check for updates every ``update_interval_hours``."""
+        # Wait before first check so the router fully starts up
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=60)
+            return
+        except asyncio.TimeoutError:
+            pass
+
         while not self._stop.is_set():
             try:
                 await self.run_once()
+            except SystemExit:
+                raise
             except Exception:  # noqa: BLE001
                 logger.exception("Auto-update cycle failed")
             try:
@@ -518,7 +527,12 @@ class AutoUpdater:
                 continue
 
     async def run_once(self) -> None:
-        """Check for an update and apply it if available."""
+        """Check for an update and apply it if available.
+
+        Strategy: pull new code + install deps, then exit the process.
+        The LaunchAgent has KeepAlive=true so launchctl restarts us
+        automatically with the new code. No self-restart needed.
+        """
         info = await asyncio.to_thread(check_for_update)
         if not info.available:
             logger.debug(
@@ -534,26 +548,16 @@ class AutoUpdater:
             info.remote_version,
         )
 
-        health_url = f"http://127.0.0.1:{self.config.port}"
-
-        result: UpdateResult = await asyncio.to_thread(
-            lambda: drain_and_run(
-                lambda: update_with_rollback(
-                    privatenet_src=_privatenet_src(),
-                    state_dir=_state_dir(),
-                    venv_dir=_venv_bin().parent,
-                    health_url=health_url,
-                ),
-                health_url=health_url,
-            )
-        )
+        result: UpdateResult = await asyncio.to_thread(run_update)
 
         if result.success:
             logger.info(
-                "Auto-update: successfully updated %s -> %s",
+                "Auto-update: updated %s -> %s — exiting for launchctl restart",
                 result.previous_sha,
                 result.new_sha,
             )
+            # KeepAlive=true in the LaunchAgent restarts us with new code
+            raise SystemExit(0)
         else:
             logger.error("Auto-update: update failed: %s", result.error)
 

@@ -658,7 +658,7 @@ class TestAutoUpdater:
 
     @pytest.mark.asyncio
     async def test_auto_updater_applies_update(self, config: "RouterConfig") -> None:
-        """run_once should call drain_and_run -> update_with_rollback when an update is available."""
+        """run_once should call run_update and exit when an update is available."""
         has_update = UpdateInfo(
             available=True,
             local_version="0.3.0",
@@ -675,11 +675,10 @@ class TestAutoUpdater:
         updater = AutoUpdater(config)
         with (
             patch("router.updater.check_for_update", return_value=has_update),
-            patch("router.updater.drain_and_run", return_value=success_result) as mock_drain,
+            patch("router.updater.run_update", return_value=success_result) as mock_update,
         ):
-            await updater.run_once()
+            with pytest.raises(SystemExit) as exc_info:
+                await updater.run_once()
 
-        mock_drain.assert_called_once()
-        # The first arg to drain_and_run should be a callable
-        callback = mock_drain.call_args[0][0]
-        assert callable(callback)
+        assert exc_info.value.code == 0
+        mock_update.assert_called_once()
