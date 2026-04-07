@@ -6,7 +6,8 @@ OMLX_REPO="https://github.com/pm990320/omlx.git"
 OMLX_REF="v0.3.1"
 PRIVATENET_REPO="https://github.com/pm990320/omlx-privatenet.git"
 PRIVATENET_REF="main"
-MLX_LM_FORK="git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
+# Pin to commit with Gemma 4 fixes (not yet in a pip release as of v0.31.1)
+MLX_LM_PACKAGE="git+https://github.com/ml-explore/mlx-lm@dcbf6e3"
 MODEL_1="gemma-4-26b-a4b-it-4bit"
 MODEL_2="gemma-4-31b-it-4bit"
 TAILSCALE_TAG="tag:omlx-node"
@@ -698,9 +699,9 @@ ensure_venv() {
   fi
 
   if [ "$INSTALL_MODE" != "client" ]; then
-    info "Installing our custom AI language model library (adds Gemma 4 support)..."
-    "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_FORK" || die "Failed to install mlx-lm fork."
-    success "Custom mlx-lm installed."
+    info "Installing mlx-lm (AI language model library with Gemma 4 support)..."
+    "$PIP_BIN" install --upgrade --force-reinstall "$MLX_LM_PACKAGE" || die "Failed to install mlx-lm."
+    success "mlx-lm installed."
   fi
 
   info "Installing the PrivateNet router dependencies..."
