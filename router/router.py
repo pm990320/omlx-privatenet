@@ -64,11 +64,13 @@ class ConsistentHashRouter:
         prefix_message_count: int = 3,
         overload_threshold: int | None = None,
         consistent_hash_replicas: int = 128,
+        prefer_local: bool = True,
     ) -> None:
         self.local_node_id = local_node_id
         self.prefix_message_count = prefix_message_count
         self.overload_threshold = overload_threshold
         self.consistent_hash_replicas = consistent_hash_replicas
+        self.prefer_local = prefer_local
         self._lock = Lock()
         self._nodes: dict[str, NodeInfo] = {}
         self._inflight_adjustments: dict[str, int] = {}
@@ -155,6 +157,24 @@ class ConsistentHashRouter:
         primary = ordered[0]
         healthy_candidates = [node for node in ordered if node.healthy]
         available = [node for node in healthy_candidates if not self._is_overloaded(node)]
+
+        # Prefer local node if enabled, healthy, has the model, and not overloaded
+        if self.prefer_local:
+            local = next((n for n in available if n.node_id == self.local_node_id), None)
+            if local is not None:
+                selected = local
+                reason = f"prefer_local; local node {local.node_id} has model and is available"
+                failover_candidates = [node for node in ordered if node.healthy]
+                return RouteDecision(
+                    selected=selected,
+                    primary=primary,
+                    ordered_candidates=failover_candidates or ordered,
+                    routing_key=routing_key,
+                    affinity_kind="local-preferred",
+                    session_id=session_id,
+                    prefix_hashes=prefix_hashes,
+                    reason=reason,
+                )
 
         if available:
             selected = available[0]

@@ -29,6 +29,7 @@ class RouterConfig:
     prefix_message_count: int = 3
     overload_threshold: int | None = None
     consistent_hash_replicas: int = 128
+    prefer_local: bool = True
     tailscale_tag: str = "tag:omlx-node"
     tailscale_bin: str = "tailscale"
     local_node_id: str = field(default_factory=lambda: socket.gethostname())
@@ -67,6 +68,7 @@ class RouterConfig:
             prefix_message_count=max(1, int(data.get("prefix_message_count", 3))),
             overload_threshold=(int(overload_threshold) if overload_threshold is not None else None),
             consistent_hash_replicas=max(1, int(data.get("consistent_hash_replicas", 128))),
+            prefer_local=_to_bool(data.get("prefer_local", True)),
             tailscale_tag=str(data.get("tailscale_tag", "tag:omlx-node")),
             tailscale_bin=str(data.get("tailscale_bin", "tailscale")),
             local_node_id=str(data.get("local_node_id") or socket.gethostname()),

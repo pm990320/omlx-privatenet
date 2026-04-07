@@ -57,6 +57,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         prefix_message_count=config.prefix_message_count,
         overload_threshold=config.overload_threshold,
         consistent_hash_replicas=config.consistent_hash_replicas,
+        prefer_local=config.prefer_local,
     )
     monitor = NodeHealthMonitor(config, router, client)
 

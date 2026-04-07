@@ -8,12 +8,13 @@ from router.router import ConsistentHashRouter, NodeInfo
 MODEL = "gemma-4-26b-a4b-it-4bit"
 
 
-def build_router(nodes: list[NodeInfo], *, overload_threshold: int | None = None) -> ConsistentHashRouter:
+def build_router(nodes: list[NodeInfo], *, overload_threshold: int | None = None, prefer_local: bool = False) -> ConsistentHashRouter:
     router = ConsistentHashRouter(
         local_node_id="node-a",
         prefix_message_count=3,
         overload_threshold=overload_threshold,
         consistent_hash_replicas=64,
+        prefer_local=prefer_local,
     )
     router.update_nodes(nodes)
     return router
@@ -602,3 +603,62 @@ def test_ordered_candidates_ring_exhaustion(make_node):
         decision = router.route_chat(payload)
 
     assert decision.selected.node_id == "node-a"
+
+
+def test_prefer_local_routes_to_local_node(make_node):
+    """When prefer_local is on, local node is selected if healthy and has model."""
+    nodes = [
+        make_node("node-a", tailscale_ip="100.64.0.1", local=True),
+        make_node("node-b", tailscale_ip="100.64.0.2"),
+    ]
+    router = build_router(nodes, prefer_local=True)
+    payload = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}]}
+
+    decision = router.route_chat(payload)
+
+    assert decision.selected.node_id == "node-a"
+    assert decision.affinity_kind == "local-preferred"
+    assert "prefer_local" in decision.reason
+
+
+def test_prefer_local_falls_back_when_local_overloaded(make_node):
+    """When local node is overloaded, fall back to hash routing."""
+    nodes = [
+        make_node("node-a", tailscale_ip="100.64.0.1", local=True, in_flight=10, max_concurrent=8),
+        make_node("node-b", tailscale_ip="100.64.0.2"),
+    ]
+    router = build_router(nodes, prefer_local=True)
+    payload = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}]}
+
+    decision = router.route_chat(payload)
+
+    assert decision.selected.node_id == "node-b"
+    assert decision.affinity_kind != "local-preferred"
+
+
+def test_prefer_local_falls_back_when_local_unhealthy(make_node):
+    """When local node is unhealthy, fall back to remote."""
+    nodes = [
+        make_node("node-a", tailscale_ip="100.64.0.1", local=True, healthy=False),
+        make_node("node-b", tailscale_ip="100.64.0.2"),
+    ]
+    router = build_router(nodes, prefer_local=True)
+    payload = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}]}
+
+    decision = router.route_chat(payload)
+
+    assert decision.selected.node_id == "node-b"
+
+
+def test_prefer_local_off_uses_hash_routing(make_node):
+    """When prefer_local is off, consistent hash determines the node."""
+    nodes = [
+        make_node("node-a", tailscale_ip="100.64.0.1", local=True),
+        make_node("node-b", tailscale_ip="100.64.0.2"),
+    ]
+    router = build_router(nodes, prefer_local=False)
+    payload = {"model": MODEL, "session_id": "test", "messages": [{"role": "user", "content": "hi"}]}
+
+    decision = router.route_chat(payload)
+
+    assert decision.affinity_kind == "session-hash"
