@@ -39,6 +39,7 @@ class RouterConfig:
     local_models: list[str] = field(default_factory=lambda: list(DEFAULT_LOCAL_MODELS))
     local_max_concurrent: int = 8
     advertise_models: list[str] | None = None  # None = all models, list = only these
+    local_fallback: bool = True  # proxy to local oMLX for any model it has, even if not advertised
     auto_download: bool = False
     auto_download_max_gb: int | None = None
     trusted_orgs: list[str] = field(default_factory=lambda: ["mlx-community"])
@@ -78,6 +79,7 @@ class RouterConfig:
             local_models=[str(model) for model in local_models],
             local_max_concurrent=max(1, int(data.get("local_max_concurrent", 8))),
             advertise_models=([str(m) for m in data["advertise_models"]] if isinstance(data.get("advertise_models"), list) else None),
+            local_fallback=_to_bool(data.get("local_fallback", True)),
             auto_download=_to_bool(data.get("auto_download", False)),
             auto_download_max_gb=(_to_optional_int(data.get("auto_download_max_gb"))),
             trusted_orgs=([str(o) for o in data["trusted_orgs"]] if isinstance(data.get("trusted_orgs"), list) else ["mlx-community"]),

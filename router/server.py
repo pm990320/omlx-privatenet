@@ -168,10 +168,30 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         return {"models": [m.to_dict() for m in registry.models]}
 
     @app.get("/v1/models")
-    async def list_models() -> dict[str, Any]:
-        """Aggregate model IDs across healthy nodes in oMLX-compatible format."""
+    async def list_models(request: Request) -> dict[str, Any]:
+        """Aggregate model IDs across healthy nodes in oMLX-compatible format.
+
+        For local clients with local_fallback enabled, also includes all
+        models from the local oMLX (even if not advertised to the network).
+        """
         now = int(time.time())
-        all_models = router.aggregate_models(healthy_only=True)
+        all_models = set(router.aggregate_models(healthy_only=True))
+
+        if config.local_fallback and _is_local_client(request):
+            try:
+                headers = _local_omlx_headers(config)
+                resp = await client.get(
+                    f"{config.local_omlx_url}/v1/models",
+                    headers=headers,
+                    timeout=config.health_check_timeout_seconds,
+                )
+                resp.raise_for_status()
+                for item in resp.json().get("data", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        all_models.add(item["id"])
+            except Exception:  # noqa: BLE001
+                pass  # best effort — don't break the endpoint
+
         data = [
             {
                 "id": model,
@@ -179,7 +199,7 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
                 "created": now,
                 "owned_by": "omlx-privatenet",
             }
-            for model in all_models
+            for model in sorted(all_models)
         ]
         return {"object": "list", "data": data}
 
@@ -193,6 +213,8 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         try:
             decision = router.route_chat(payload)
         except (LookupError, ValueError) as exc:
+            if config.local_fallback and _is_local_client(request):
+                return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/chat/completions", stream=bool(payload.get("stream")))
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return await _proxy_via_selected_node(
             request=request,
@@ -212,6 +234,8 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
         try:
             decision = router.route_embeddings(payload)
         except (LookupError, ValueError) as exc:
+            if config.local_fallback and _is_local_client(request):
+                return await _proxy_to_local_omlx(request=request, payload=payload, endpoint="/v1/embeddings", stream=False)
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return await _proxy_via_selected_node(
             request=request,
@@ -464,6 +488,14 @@ def _require_router_api_key(request: Request, config: RouterConfig) -> None:
 
 def _is_local_only(request: Request) -> bool:
     return request.headers.get(LOCAL_ONLY_HEADER, "").strip() == "1"
+
+
+def _is_local_client(request: Request) -> bool:
+    """True when the request originates from this machine, not from a peer."""
+    if request.headers.get(ROUTED_BY_HEADER):
+        return False  # forwarded by another router
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost", "")
 
 
 def _is_node_disabled() -> bool:

@@ -159,7 +159,7 @@ async def test_streaming_sse_passthrough_works(app_factory, make_node):
 async def test_no_healthy_nodes_returns_503(app_factory, make_node):
     nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL], healthy=False)]
 
-    async with app_factory(nodes=nodes) as (_, client):
+    async with app_factory(nodes=nodes, config_overrides={"local_fallback": False}) as (_, client):
         response = await client.post(
             "/v1/chat/completions",
             json={"model": CHAT_MODEL, "session_id": "none", "messages": [{"role": "user", "content": "hi"}]},
@@ -432,7 +432,7 @@ async def test_embeddings_no_healthy_nodes_returns_503(app_factory, make_node):
     """When no healthy nodes for embeddings, return 503."""
     nodes = [make_node("local-node", tailscale_ip="100.64.0.1", local=True, models=[CHAT_MODEL], healthy=False)]
 
-    async with app_factory(nodes=nodes) as (_, client):
+    async with app_factory(nodes=nodes, config_overrides={"local_fallback": False}) as (_, client):
         response = await client.post(
             "/v1/embeddings",
             json={"model": EMBED_MODEL, "input": "hello"},
