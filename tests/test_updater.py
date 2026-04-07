@@ -237,12 +237,12 @@ class TestRunUpdate:
         flat = [" ".join(c) for c in commands_run]
         assert any("fetch --tags" in c and str(omlx_src) in c for c in flat), \
             f"Expected oMLX git fetch --tags, got: {flat}"
-        assert any("checkout" in c and "v0.5.0" in c for c in flat), \
-            f"Expected git checkout v0.5.0, got: {flat}"
+        assert any("checkout -f" in c for c in flat), \
+            f"Expected git checkout -f <ref>, got: {flat}"
         assert any("install" in c and "-e" in c and str(omlx_src) in c for c in flat), \
             f"Expected pip install -e omlx, got: {flat}"
         assert any("mlx-lm" in c for c in flat), \
-            f"Expected mlx-lm fork install, got: {flat}"
+            f"Expected mlx-lm install, got: {flat}"
 
     def test_omlx_update_skipped_when_absent(self, tmp_path: Path) -> None:
         """When oMLX source dir doesn't exist, run_update should skip it."""

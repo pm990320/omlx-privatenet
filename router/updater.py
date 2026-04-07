@@ -21,7 +21,21 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
-MLX_LM_FORK = "git+https://github.com/pm990320/mlx-lm@feat/gemma4-tool-calling"
+def _read_install_var(var_name: str, default: str = "") -> str:
+    """Read a variable from the install script (single source of truth)."""
+    install_script = _privatenet_src() / "scripts" / "install.sh"
+    if not install_script.exists():
+        return default
+    try:
+        for line in install_script.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{var_name}="):
+                # Extract value, removing quotes
+                value = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                return value
+    except Exception:
+        pass
+    return default
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -252,32 +266,25 @@ def run_update(
     omlx_src = _omlx_src()
     if omlx_src.is_dir():
         try:
-            # Fetch latest tags
+            omlx_ref = _read_install_var("OMLX_REF", "main")
             subprocess.run(
                 ["git", "-C", str(omlx_src), "fetch", "--tags", "origin"],
                 capture_output=True, text=True, check=True,
             )
-            # Get the latest tag
-            tag_result = subprocess.run(
-                ["git", "-C", str(omlx_src), "describe", "--tags", "--abbrev=0",
-                 "origin/HEAD"],
+            subprocess.run(
+                ["git", "-C", str(omlx_src), "checkout", "-f", omlx_ref],
                 capture_output=True, text=True, check=True,
             )
-            latest_tag = tag_result.stdout.strip()
-            if latest_tag:
-                subprocess.run(
-                    ["git", "-C", str(omlx_src), "checkout", latest_tag],
-                    capture_output=True, text=True, check=True,
-                )
             # Reinstall oMLX in editable mode
             pip = str(venv_bin / "pip")
             subprocess.run(
                 [pip, "install", "-e", str(omlx_src)],
                 capture_output=True, text=True, check=True,
             )
-            # Reinstall the mlx-lm fork
+            # Reinstall mlx-lm (reads package spec from install.sh)
+            mlx_lm_pkg = _read_install_var("MLX_LM_PACKAGE", "mlx-lm")
             subprocess.run(
-                [pip, "install", "--upgrade", "--force-reinstall", MLX_LM_FORK],
+                [pip, "install", "--upgrade", "--force-reinstall", mlx_lm_pkg],
                 capture_output=True, text=True, check=True,
             )
         except subprocess.CalledProcessError as exc:
