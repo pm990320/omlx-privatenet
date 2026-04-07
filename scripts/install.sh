@@ -313,6 +313,40 @@ with open(config_path, "w") as f:
       info "$line"
     done
     success "OpenClaw plugin configured (backup at openclaw.json.pre-privatenet-bak)"
+
+    # Add omlx auth profile to all agents
+    info "Adding omlx auth to OpenClaw agents..."
+    python3 -c '
+import json
+from pathlib import Path
+
+agents_dir = Path.home() / ".openclaw" / "agents"
+api_key = "'"$OMLX_API_KEY"'" or "omlx"
+count = 0
+
+for auth_file in agents_dir.glob("*/agent/auth-profiles.json"):
+    try:
+        with open(auth_file) as f:
+            data = json.load(f)
+        if "omlx:default" in data.get("profiles", {}):
+            continue
+        data.setdefault("profiles", {})["omlx:default"] = {
+            "type": "token",
+            "provider": "omlx",
+            "token": api_key,
+        }
+        data.setdefault("lastGood", {})["omlx"] = "omlx:default"
+        with open(auth_file, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        count += 1
+    except Exception:
+        pass
+print(f"Updated {count} agent(s)")
+' 2>&1 | while IFS= read -r line; do
+      info "$line"
+    done
+    success "omlx auth added to all OpenClaw agents."
   else
     warn "Could not find openclaw.json at $openclaw_config"
     warn "After installing OpenClaw, configure the plugin manually:"
